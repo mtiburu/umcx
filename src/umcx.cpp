@@ -16,13 +16,11 @@
 #endif
 #include "nlohmann/json.hpp"
 
-#define RAND_BUF_LEN            2
 #define ONE_OVER_C0             3.335640951981520e-12f
 #ifndef M_PI
     #define M_PI 3.14159265358979323846
 #endif
 
-typedef uint64_t  RandType;
 using json = nlohmann::ordered_json;
 /// basic data type: float4 class
 /** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
@@ -66,7 +64,7 @@ struct MCX_medium {
 /// MCX_rand provides the xorshift128p random number generator
 /**  */
 struct MCX_rand { // per thread
-    RandType t[RAND_BUF_LEN];
+    uint64_t t[2];
 
     MCX_rand(dim4 seed) {
         t[0] = (uint64_t)seed.x << 32 | seed.y;
@@ -120,9 +118,7 @@ class MCX_volume { // shared, read-only
         std::ifstream inputjnii(fname);
         json jnii;
         inputjnii >> jnii;
-        size.x = jnii["NIFTIData"]["_ArraySize_"][0];
-        size.y = jnii["NIFTIData"]["_ArraySize_"][1];
-        size.z = jnii["NIFTIData"]["_ArraySize_"][2];
+        size = dim4(jnii["NIFTIData"]["_ArraySize_"][0], jnii["NIFTIData"]["_ArraySize_"][1], jnii["NIFTIData"]["_ArraySize_"][2]);
     }
     int64_t index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
         return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
@@ -131,6 +127,7 @@ class MCX_volume { // shared, read-only
         return vol[idx];
     }
     void add(T val, int64_t idx) const  {
+        #pragma omp atomic
         vol[idx] += val;
     }
     T* buffer() const  {
@@ -152,7 +149,7 @@ struct MCX_photon { // per thread
         pos.set(p0[0], p0[1], p0[2], p0.size() > 3 ? p0[3] : 1.f);
         vec.set(v0[0], v0[1], v0[2], 0.f);
         rvec.set(1.f / v0[0], 1.f / v0[1], 1.f / v0[2], 1.f);
-        len.set(NAN, 0.f, 0.f, 0.f);
+        len.set(NAN, 0.f, 0.f, pos.w);
         ipos = short4((short)p0[0], (short)p0[1], (short)p0[2], -1);
         lastvoxelidx = -1;
         mediaid = 0;
@@ -163,23 +160,33 @@ struct MCX_photon { // per thread
         len.x = ran.next_scat_len();
 
         while (1) {
-            if (sprint(invol, outvol, props)) {
+            if (sprint(invol, outvol, props, ran)) {
                 break;
             }
 
             scatter(props[mediaid], ran);
         }
     }
-    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[]) { // run from one scattering site to the next, return 1 when terminate
+    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran) { // run from one scattering site to the next, return 1 when terminate
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
 
-            if (newvoxelid > 0 && newvoxelid != lastvoxelidx) { // only save when moving out of a voxel
+            if (newvoxelid != lastvoxelidx) { // only save when moving out of a voxel
                 save(outvol);
+                int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
+
+                if (props[mediaid].n != props[newmediaid].n) {
+                    if (reflect(props[mediaid].n, props[newmediaid].n, ran) && (newvoxelid < 0 || newmediaid == 0)) {
+                        return 1;
+                    }
+                } else if (newvoxelid < 0 || newmediaid == 0) {
+                    return 1;
+                }
+
                 lastvoxelidx = newvoxelid; // save last saving site
-                mediaid = invol.get(lastvoxelidx);
-            } else if (newvoxelid < 0) {
-                return 1;
+                mediaid = newmediaid;
+            } else {
+                return 0;
             }
         }
 
@@ -207,7 +214,7 @@ struct MCX_photon { // per thread
         if (htime[1] > 0.f) { // photon need to move to next voxel
             (ipos.w == 0) ? (ipos.x += (vec.x > 0.f ? 1 : -1)) :
             ((ipos.w == 1) ? ipos.y += (vec.y > 0.f ? 1 : -1) :
-                                       (ipos.z += (vec.z > 0.f ? 1 : -1)));
+                                       (ipos.z += (vec.z > 0.f ? 1 : -1))); // update ipos.xyz based on ipos.w = flipdir
             return invol.index(ipos.x, ipos.y, ipos.z);
         }
 
@@ -242,8 +249,8 @@ struct MCX_photon { // per thread
         rvec.set(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f);
         vec.w++;
     }
-    float reflectcoeff(float n1, float n2, int flipdir) {
-        float Icos = fabsf((flipdir == 0) ? vec.x : (flipdir == 1 ? vec.y : vec.z));
+    float reflectcoeff(float n1, float n2) {
+        float Icos = fabsf((ipos.w == 0) ? vec.x : (ipos.w == 1 ? vec.y : vec.z));
         float tmp0 = n1 * n1;
         float tmp1 = n2 * n2;
         float tmp2 = 1.f - tmp0 / tmp1 * (1.f - Icos * Icos); /** 1-[n1/n2*sin(si)]^2 = cos(ti)^2*/
@@ -261,15 +268,15 @@ struct MCX_photon { // per thread
 
         return 1.f;  //< total reflection
     }
-    void transmit(float n1, float n2, int flipdir) {
+    void transmit(float n1, float n2) {
         float tmp0 = n1 / n2;
 
         vec.x *= tmp0;
         vec.y *= tmp0;
         vec.z *= tmp0;
-        (flipdir == 0) ?
+        (ipos.w == 0) ?
         (vec.x = ((tmp0 = vec.y * vec.y + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.x > 0.f) - (vec.x < 0.f)) : 0.f) :
-        ((flipdir == 1) ?
+        ((ipos.w == 1) ?
          (vec.y = ((tmp0 = vec.x * vec.x + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.y > 0.f) - (vec.y < 0.f)) : 0.f) :
          (vec.z = ((tmp0 = vec.x * vec.x + vec.y * vec.y) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.z > 0.f) - (vec.z < 0.f)) : 0.f));
         tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
@@ -277,16 +284,16 @@ struct MCX_photon { // per thread
         vec.y *= tmp0;
         vec.z *= tmp0;
     }
-    float reflect(float n1, float n2, int flipdir, MCX_rand& ran) {
-        float Rtotal = reflectcoeff(n1, n2, flipdir);
+    int reflect(float n1, float n2, MCX_rand& ran) {
+        float Rtotal = reflectcoeff(n1, n2);
 
         if (ran.rand01() > Rtotal) {
-            (flipdir == 0) ? (vec.x = -vec.x) : ((flipdir == 1) ? (vec.y = -vec.y) : (vec.z = -vec.z)) ;
+            (ipos.w == 0) ? (vec.x = -vec.x) : ((ipos.w == 1) ? (vec.y = -vec.y) : (vec.z = -vec.z)) ;
+            return 0;
         } else {
-            transmit(n1, n2, flipdir);
+            transmit(n1, n2);
+            return 1;
         }
-
-        return Rtotal;
     }
     void rotatevector(float stheta, float ctheta, float sphi, float cphi) {
         if ( vec.z > -1.f + FLT_EPSILON && vec.z < 1.f - FLT_EPSILON ) {
@@ -336,7 +343,7 @@ struct MCX_userio {
             {
                 "NIFTIData", {
                     {"_ArraySize_", {cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]}},
-                    {"_ArrayType_", "single"},
+                    {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
                     {"_ArrayData_", std::vector<float>(outputvol.buffer(), outputvol.buffer() + outputvol.count())}
                 }
             }
@@ -378,8 +385,9 @@ int main(int argn, char* argv[]) {
 #endif
     }
 
-    printf("completed %.6f ms\n", timer.elapse());
+    printf("simulation completed %.6f ms\n", timer.elapse());
     io.save(outputvol);
+    printf("file saving completed %.6f ms\n", timer.elapse());
     delete [] prop;
     return 0;
 }

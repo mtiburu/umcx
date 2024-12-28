@@ -1,9 +1,13 @@
-CXXFLAGS += -g -Wall -pedantic -O3 -fopenmp
+CXXFLAGS += -g -Wall -pedantic -O3 -std=c++11
 BINARY = umcx
 SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)
 
-all: $(BINARY)
+debugmulti multi: CXXFLAGS+=-fopenmp
+debugsingle debugmulti: CXXFLAGS+=-DDEBUG
+debugsingle debugmulti multi single: $(BINARY)
+
+all: multi
 
 $(BINARY): $(OBJS)
 	$(CXX)  $(CXXFLAGS) -o $(BINARY) $(OBJS)

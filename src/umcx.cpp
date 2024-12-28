@@ -1,8 +1,16 @@
+/***************************************************************************//**
+**  \mainpage uMCX: readable, portable, hackable and massively-parallel photon simulator
+**  \copyright Qianqian Fang <q.fang at neu.edu>, 2024-2025
+**  \section slicense License
+**          GPL v3, see LICENSE.txt for details
+*******************************************************************************/
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <cfloat>
 #include <math.h>
+#include <chrono>
+
 #ifdef _OPENMP
     #include <omp.h>
 #endif
@@ -15,9 +23,9 @@
 #endif
 
 typedef uint64_t  RandType;
-
-using json = nlohmann::json;
-
+using json = nlohmann::ordered_json;
+/// basic data type: float4 class
+/** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
     float4() {}
@@ -31,32 +39,36 @@ struct float4 {
         return *this;
     }
 };
-
+/// basic data type: dim4 class
+/** dim4 is used to represent array dimensions, with 4x uint32_t members {x,y,z,w} */
 struct dim4 {
     uint32_t x = 0u, y = 0u, z = 0u, w = 0u;
     dim4() {}
     dim4(uint32_t v) : x(v), y(v), z(v), w(v) {}
     dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0) : x(x0), y(y0), z(z0), w(w0) {}
 };
-
+/// basic data type: short4 class
+/**  */
 struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
     short4() {}
     short4(int16_t v) : x(v), y(v), z(v), w(v) {}
     short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0) : x(x0), y(y0), z(z0), w(w0) {}
 };
-
-struct mcx_medium {
+/// Volumetric optical properties
+/** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
+struct MCX_medium {
     float mua = 0.f, mus = 0.f, g = 1.f, n = 1.f;
-    mcx_medium() {}
-    mcx_medium(float mua0, float mus0) : mua(mua0), mus(mus0) {}
-    mcx_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
+    MCX_medium() {}
+    MCX_medium(float mua0, float mus0) : mua(mua0), mus(mus0) {}
+    MCX_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
 };
-
-struct mcx_rand { // per thread
+/// MCX_rand provides the xorshift128p random number generator
+/**  */
+struct MCX_rand { // per thread
     RandType t[RAND_BUF_LEN];
 
-    mcx_rand(dim4 seed) {
+    MCX_rand(dim4 seed) {
         t[0] = (uint64_t)seed.x << 32 | seed.y;
         t[1] = (uint64_t)seed.z << 32 | seed.w;
     }
@@ -73,22 +85,22 @@ struct mcx_rand { // per thread
         t[1] = s1.i ^ s0 ^ (s1.i >> 18) ^ (s0 >> 5); // b, c
         s1.i = t[1] + s0;
         s1.u[0] = 0x3F800000U | (s1.u[0] >> 9);
-
         return s1.f[0] - 1.0f;
     }
     float next_scat_len() {
         return -logf(rand01() + FLT_EPSILON);
     }
 };
-
+/// MCX_volume class manages input and output volume
+/** */
 template<class T>
-class mcx_volume { // shared, read-only
+class MCX_volume { // shared, read-only
     dim4 size;
     uint64_t dimxy = 0, dimxyz = 0, dimxyzt = 0;
     T* vol = nullptr;
 
   public:
-    mcx_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1) {
+    MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1) {
         size = dim4(Nx, Ny, Nz, Nt);
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
@@ -99,7 +111,7 @@ class mcx_volume { // shared, read-only
             vol[i] = 1;
         }
     }
-    ~mcx_volume () {
+    ~MCX_volume () {
         size = dim4(0);
         delete [] vol;
         vol = nullptr;
@@ -121,15 +133,22 @@ class mcx_volume { // shared, read-only
     void add(T val, int64_t idx) const  {
         vol[idx] += val;
     }
+    T* buffer() const  {
+        return vol;
+    }
+    uint64_t count() const  {
+        return dimxyzt;
+    }
 };
-
-struct mcx_photon { // per thread
+/// MCX_photon class performs MC simulation of a single photon
+/** */
+struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
     int64_t lastvoxelidx;
     int mediaid;
 
-    mcx_photon(std::vector<float> p0, std::vector<float> v0) { // constructor
+    MCX_photon(std::vector<float> p0, std::vector<float> v0) { // constructor
         pos.set(p0[0], p0[1], p0[2], p0.size() > 3 ? p0[3] : 1.f);
         vec.set(v0[0], v0[1], v0[2], 0.f);
         rvec.set(1.f / v0[0], 1.f / v0[1], 1.f / v0[2], 1.f);
@@ -138,7 +157,7 @@ struct mcx_photon { // per thread
         lastvoxelidx = -1;
         mediaid = 0;
     }
-    void run(mcx_volume<int>& invol, mcx_volume<float>& outvol, mcx_medium props[], mcx_rand& ran) { // main function to run a single photon from lunch to termination
+    void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran) { // main function to run a single photon from lunch to termination
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
@@ -151,7 +170,7 @@ struct mcx_photon { // per thread
             scatter(props[mediaid], ran);
         }
     }
-    int sprint(mcx_volume<int>& invol, mcx_volume<float>& outvol, mcx_medium props[]) { // run from one scattering site to the next, return 1 when terminate
+    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[]) { // run from one scattering site to the next, return 1 when terminate
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
 
@@ -166,7 +185,7 @@ struct mcx_photon { // per thread
 
         return 0;
     }
-    int64_t step(mcx_volume<int>& invol, mcx_medium prop) {
+    int64_t step(MCX_volume<int>& invol, MCX_medium prop) {
         float dist, htime[3];
 
         htime[0] = fabsf((ipos.x + (vec.x > 0.f) - pos.x) * rvec.x);  //< time-of-flight to hit the wall in each direction
@@ -194,11 +213,11 @@ struct mcx_photon { // per thread
 
         return lastvoxelidx;
     }
-    void save(mcx_volume<float>& outvol) {
+    void save(MCX_volume<float>& outvol) {
         outvol.add(len.w - pos.w, lastvoxelidx);
         len.w = pos.w;
     }
-    void scatter(mcx_medium& prop, mcx_rand& ran) {
+    void scatter(MCX_medium& prop, MCX_rand& ran) {
         float tmp0, sphi, cphi, theta, stheta, ctheta;
         len.x = ran.next_scat_len();
 
@@ -221,6 +240,7 @@ struct mcx_photon { // per thread
 
         rotatevector(stheta, ctheta, sphi, cphi);
         rvec.set(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f);
+        vec.w++;
     }
     float reflectcoeff(float n1, float n2, int flipdir) {
         float Icos = fabsf((flipdir == 0) ? vec.x : (flipdir == 1 ? vec.y : vec.z));
@@ -257,7 +277,7 @@ struct mcx_photon { // per thread
         vec.y *= tmp0;
         vec.z *= tmp0;
     }
-    float reflect(float n1, float n2, int flipdir, mcx_rand& ran) {
+    float reflect(float n1, float n2, int flipdir, MCX_rand& ran) {
         float Rtotal = reflectcoeff(n1, n2, flipdir);
 
         if (ran.rand01() > Rtotal) {
@@ -288,31 +308,78 @@ struct mcx_photon { // per thread
         vec.z *= tmp0;
     }
 };
-
+/// MCX_clock class provides timing information
+/** */
+struct MCX_clock {
+    std::chrono::system_clock::time_point starttime;
+    MCX_clock() : starttime(std::chrono::system_clock::now()) {}
+    double elapse() {
+        std::chrono::duration<double> elapsetime = (std::chrono::system_clock::now() - starttime);
+        return elapsetime.count() * 1000.;
+    }
+};
+/// MCX_userio parses user JSON input and saves output to binary JSON files
+/** */
+struct MCX_userio {
+    json cfg;
+    MCX_userio(std::string finput) {
+        std::ifstream inputjson(finput);
+        inputjson >> cfg;
+    }
+    void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
+        json bniifile = {
+            {
+                "NIFTIHeader", {
+                    {"Dim", {cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]}}
+                }
+            },
+            {
+                "NIFTIData", {
+                    {"_ArraySize_", {cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]}},
+                    {"_ArrayType_", "single"},
+                    {"_ArrayData_", std::vector<float>(outputvol.buffer(), outputvol.buffer() + outputvol.count())}
+                }
+            }
+        };
+        std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
+        std::vector<uint8_t> output_vector;
+        json::to_bjdata(bniifile, outputdata);
+        outputdata.write((const char*)output_vector.data(), output_vector.size());
+    }
+};
+/////////////////////////////////////////////////
+/// \brief main function
+/////////////////////////////////////////////////
 int main(int argn, char* argv[]) {
     if (argn == 1) {
         std::cout << "format: umcx input.json" << std::endl;
         return 0;
     }
 
-    std::ifstream inputjson(argv[1]);
-    json cfg;
-    inputjson >> cfg;
+    MCX_userio io(argv[1]);
+    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
+    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
+    MCX_medium* prop = new MCX_medium[io.cfg["Domain"]["Media"].size()];
 
-    mcx_volume<int> inputvol(cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]);
-    mcx_volume<float> outputvol(cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]);
-    mcx_medium* prop = new mcx_medium[cfg["Domain"]["Media"].size()];
-
-    for (uint32_t i = 0; i < cfg["Domain"]["Media"].size(); i++) {
-        prop[i] = mcx_medium(cfg["Domain"]["Media"][i]["mua"], cfg["Domain"]["Media"][i]["mus"], cfg["Domain"]["Media"][i]["g"], cfg["Domain"]["Media"][i]["n"]);
+    for (uint32_t i = 0; i < io.cfg["Domain"]["Media"].size(); i++) {
+        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
     }
 
-    for (uint64_t i = 0; i < cfg["Session"]["Photons"]; i++) {
-        mcx_rand ran(dim4(std::rand(), std::rand(), std::rand(), std::rand()));
-        mcx_photon p(cfg["Optode"]["Source"]["Pos"].get<std::vector<float>>(), cfg["Optode"]["Source"]["Dir"].get<std::vector<float>>());
+    MCX_clock timer;
+
+    #pragma omp parallel for
+
+    for (uint64_t i = 0; i < io.cfg["Session"]["Photons"].get<uint64_t>(); i++) {
+        MCX_rand ran(dim4(std::rand(), std::rand(), std::rand(), std::rand()));
+        MCX_photon p(io.cfg["Optode"]["Source"]["Pos"].get<std::vector<float>>(), io.cfg["Optode"]["Source"]["Dir"].get<std::vector<float>>());
         p.run(inputvol, outputvol, prop, ran);
+#ifdef DEBUG
+        printf("p = [%f %f %f %f] ip= [%d %d %d %d] v=[%f %f %f %f]\n", p.pos.x, p.pos.y, p.pos.z, p.pos.w, p.ipos.x, p.ipos.y, p.ipos.z, p.ipos.w, p.vec.x, p.vec.y, p.vec.z, p.vec.w);
+#endif
     }
 
+    printf("completed %.6f ms\n", timer.elapse());
+    io.save(outputvol);
     delete [] prop;
     return 0;
 }

@@ -1,9 +1,9 @@
-/***************************************************************************//**
-**  \mainpage uMCX: readable, portable, hackable and massively-parallel photon simulator
-**  \copyright Qianqian Fang <q.fang at neu.edu>, 2024-2025
-**  \section slicense License
-**          GPL v3, see LICENSE.txt for details
-*******************************************************************************/
+//////////////////////////////////////////////////////////////////////////////////////////////////
+///  \mainpage uMCX: readable, portable, hackable and massively-parallel photon simulator
+///  \copyright Qianqian Fang <q.fang at neu.edu>, 2024-2025
+///  \section slicense License
+///          GPL v3, see LICENSE.txt for details
+//////////////////////////////////////////////////////////////////////////////////////////////////
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -27,40 +27,21 @@ using json = nlohmann::ordered_json;
 /** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
-    float4() {}
-    float4(float v) : x(v), y(v), z(v), w(v) {}
-    float4(float x0, float y0, float z0, float w0 = 0.f) : x(x0), y(y0), z(z0), w(w0) {}
-    void set(float x0, float y0, float z0, float w0)  {
-        x = x0, y = y0, z = z0, w = w0;
-    }
-    float4& operator=(float4 a) {
-        set(a.x, a.y, a.z, a.w);
-        return *this;
-    }
 };
 /// basic data type: dim4 class
 /** dim4 is used to represent array dimensions, with 4x uint32_t members {x,y,z,w} */
 struct dim4 {
     uint32_t x = 0u, y = 0u, z = 0u, w = 0u;
-    dim4() {}
-    dim4(uint32_t v) : x(v), y(v), z(v), w(v) {}
-    dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// basic data type: short4 class
 /**  */
 struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
-    short4() {}
-    short4(int16_t v) : x(v), y(v), z(v), w(v) {}
-    short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// Volumetric optical properties
 /** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
 struct MCX_medium {
     float mua = 0.f, mus = 0.f, g = 1.f, n = 1.f;
-    MCX_medium() {}
-    MCX_medium(float mua0, float mus0) : mua(mua0), mus(mus0) {}
-    MCX_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
 };
 #pragma omp end declare target
 /// MCX_volume class manages input and output volume
@@ -72,19 +53,24 @@ class MCX_volume { // shared, read-only
     T* vol = nullptr;
 
   public:
-    MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1) {
-        size = dim4(Nx, Ny, Nz, Nt);
+    MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
+        size = (dim4) {
+            Nx, Ny, Nz, Nt
+        };
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
         dimxyzt = dimxyz * Nt;
         vol = new T[dimxyzt]();
 
-        for (uint64_t i = 0; i < dimxyzt; i++) {
-            vol[i] = 1;
-        }
+        if (value != 0)
+            for (uint64_t i = 0; i < dimxyzt; i++) {
+                vol[i] = value;
+            }
     }
     ~MCX_volume () {
-        size = dim4(0);
+        size = (dim4) {
+            0, 0, 0, 0
+        };
         delete [] vol;
         vol = nullptr;
     }
@@ -117,9 +103,9 @@ class MCX_volume { // shared, read-only
 struct MCX_rand { // per thread
     uint64_t t[2];
 
-    MCX_rand(dim4 seed) {
-        t[0] = (uint64_t)seed.x << 32 | seed.y;
-        t[1] = (uint64_t)seed.z << 32 | seed.w;
+    MCX_rand(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3) {
+        t[0] = (uint64_t)s0 << 32 | s1;
+        t[1] = (uint64_t)s2 << 32 | s3;
     }
     float rand01() { //< advance random state, return a uniformly 0-1 distributed float random number
         union {
@@ -143,17 +129,23 @@ struct MCX_rand { // per thread
 /// MCX_photon class performs MC simulation of a single photon
 /** */
 struct MCX_photon { // per thread
-    float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,*/, len /*{pscat,t,pathlen,p0}*/;
+    float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,unused*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
     int64_t lastvoxelidx;
     int mediaid;
 
-    MCX_photon(float4 p0, float4 v0) { // constructor
+    MCX_photon(float4& p0, float4& v0) { // constructor
         pos = p0;
         vec = v0;
-        rvec.set(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
-        len.set(NAN, 0.f, 0.f, pos.w);
-        ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
+        rvec = (float4) {
+            1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f
+        };
+        len = (float4) {
+            NAN, 0.f, 0.f, pos.w
+        };
+        ipos = (short4) {
+            (short)p0.x, (short)p0.y, (short)p0.z, -1
+        };
         lastvoxelidx = -1;
         mediaid = 0;
     }
@@ -208,7 +200,9 @@ struct MCX_photon { // per thread
         htime[0] = fminf(htime[0], len.x);
         htime[1] = (htime[0] != len.x); // is continue next voxel?
         dist = (prop.mus == 0.f) ? dist : (htime[0] / prop.mus);
-        pos.set(pos.x + dist * vec.x, pos.y + dist * vec.y, pos.z + dist * vec.z, expf(-prop.mua * dist));
+        pos = (float4) {
+            pos.x + dist* vec.x, pos.y + dist* vec.y, pos.z + dist* vec.z, pos.w* expf(-prop.mua * dist)
+        };
 
         len.x -= htime[0];
         len.y += dist * prop.n * ONE_OVER_C0;
@@ -232,9 +226,9 @@ struct MCX_photon { // per thread
         len.x = ran.next_scat_len();
 
         tmp0 = (2.f * M_PI) * ran.rand01(); //next arimuth angle
-        sphi = sinf(tmp0);
-        cphi = cosf(tmp0);
-        //sincosf(tmp0, &sphi, &cphi);
+        //sphi = sinf(tmp0);
+        //cphi = cosf(tmp0);
+        sincosf(tmp0, &sphi, &cphi);
 
         if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
             tmp0 = (1.f - prop.g * prop.g) / (1.f - prop.g + 2.f * prop.g * ran.rand01());
@@ -247,14 +241,16 @@ struct MCX_photon { // per thread
             ctheta = tmp0;
         } else {
             theta = acosf(2.f * ran.rand01() - 1.f);
-            stheta = sinf(theta);
-            ctheta = cosf(theta);
-            //sincosf(theta, &stheta, &ctheta);
+            //stheta = sinf(theta);
+            //ctheta = cosf(theta);
+            sincosf(theta, &stheta, &ctheta);
         }
 
         rotatevector(stheta, ctheta, sphi, cphi);
-        rvec.set(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f);
-        vec.w++;
+        rvec = (float4) {
+            1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f
+        };
+        vec.w++; // stops at 16777216 due to finite precision
     }
     float reflectcoeff(float n1, float n2) {
         float Icos = fabsf((ipos.w == 0) ? vec.x : (ipos.w == 1 ? vec.y : vec.z));
@@ -306,14 +302,16 @@ struct MCX_photon { // per thread
         if ( vec.z > -1.f + FLT_EPSILON && vec.z < 1.f - FLT_EPSILON ) {
             float tmp0 = 1.f - vec.z * vec.z;
             float tmp1 = stheta / sqrtf(tmp0);
-            vec.set(
-                tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x * ctheta,
-                tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y * ctheta,
-                -tmp1 * tmp0 * cphi                          + vec.z * ctheta,
-                vec.w
-            );
+            vec = (float4) {
+                tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x* ctheta,
+                     tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y* ctheta,
+                     -tmp1* tmp0* cphi                          + vec.z* ctheta,
+                     vec.w
+            };
         } else {
-            vec.set(stheta * cphi, stheta * sphi, (vec.z > 0.f) ? ctheta : -ctheta, vec.w);
+            vec = (float4) {
+                stheta* cphi, stheta* sphi, (vec.z > 0.f) ? ctheta : -ctheta, vec.w
+            };
         }
 
         float tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
@@ -338,8 +336,16 @@ struct MCX_clock {
 struct MCX_userio {
     json cfg;
     MCX_userio(std::string finput) {
-        std::ifstream inputjson(finput);
-        inputjson >> cfg;
+        if (finput == "cube60") {
+            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+                {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
+                {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
+                {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}
+            };
+        } else {
+            std::ifstream inputjson(finput);
+            inputjson >> cfg;
+        }
     }
     void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
         json bniifile = {
@@ -372,36 +378,37 @@ int main(int argn, char* argv[]) {
     }
 
     MCX_userio io(argv[1]);
-    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
+    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
     MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
     MCX_medium* prop = new MCX_medium[io.cfg["Domain"]["Media"].size()];
 
     for (uint32_t i = 0; i < io.cfg["Domain"]["Media"].size(); i++) {
-        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
+        prop[i] = (MCX_medium) {
+            io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]
+        };
     }
 
+    double energyescape = 0.0;
     MCX_clock timer;
     uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
-    dim4 seeds = dim4(std::rand(), std::rand(), std::rand(), std::rand());  //< TODO: need to implement per-thread ran object
-    float4 pos(io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2]);
-    float4 dir(io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2]);
-#ifdef USE_OMP_TARGET
+    dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
+    float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2], 1.f};
+    float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
+#ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for \
-    map(to: inputvol) map(to: prop) map(tofrom: outputvol)
+    map(to: inputvol) map(to: prop) map(tofrom: outputvol) reduction(+ : energyescape)
 #else
-    #pragma omp parallel for
+    #pragma omp parallel for reduction(+ : energyescape)
 #endif
 
     for (uint64_t i = 0; i < nphoton; i++) {
-        MCX_rand ran(dim4(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i));
+        MCX_rand ran(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
         MCX_photon p(pos, dir);
         p.run(inputvol, outputvol, prop, ran);
-#ifdef DEBUG
-        printf("p = [%f %f %f %f] ip= [%d %d %d %d] v=[%f %f %f %f]\n", p.pos.x, p.pos.y, p.pos.z, p.pos.w, p.ipos.x, p.ipos.y, p.ipos.z, p.ipos.w, p.vec.x, p.vec.y, p.vec.z, p.vec.w);
-#endif
+        energyescape += p.pos.w;
     }
 
-    printf("simulation completed %.6f ms\n", timer.elapse());
+    printf("simulation completed %.6f ms, absorption fraction %.6f%%\n", timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
     io.save(outputvol);
     delete [] prop;
     return 0;

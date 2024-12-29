@@ -1,10 +1,14 @@
-CXXFLAGS += -g -Wall -pedantic -O3 -std=c++11
+CXXFLAGS += -g -Wall -Wextra -std=c++14 -O3 #-pedantic
 BINARY = umcx
 SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)
 
-nvidia: CXXFLAGS+=-foffload=nvptx-none -fcf-protection=none -fno-stack-protector -DUSE_OMP_TARGET
-nvidia: multi
+nvc: CXX=nvc++
+nvc: CXXFLAGS+=-mp=gpu -Minfo=mp
+amd: CXXFLAGS+=-foffload=amdgcn-amdhsa="-march=gfx906" -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
+nvidia: CXXFLAGS+=-foffload=nvptx-none -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
+nvidia amd nvc: multi
+
 debugmulti multi: CXXFLAGS+=-fopenmp
 debugsingle debugmulti: CXXFLAGS+=-DDEBUG
 debugsingle debugmulti multi single: $(BINARY)

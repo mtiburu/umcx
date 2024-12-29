@@ -125,7 +125,7 @@ struct MCX_rand { // per thread
         union {
             uint64_t i;
             float f[2];
-            uint  u[2];
+            uint32_t u[2];
         } s1;
         const uint64_t s0 = t[1];
         s1.i = t[0];

@@ -3,6 +3,8 @@ BINARY = umcx
 SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)
 
+nvidia: CXXFLAGS+=-foffload=nvptx-none -fcf-protection=none -fno-stack-protector -DUSE_OMP_TARGET
+nvidia: multi
 debugmulti multi: CXXFLAGS+=-fopenmp
 debugsingle debugmulti: CXXFLAGS+=-DDEBUG
 debugsingle debugmulti multi single: $(BINARY)

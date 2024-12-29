@@ -22,13 +22,14 @@
 #endif
 
 using json = nlohmann::ordered_json;
+#pragma omp declare target
 /// basic data type: float4 class
 /** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
     float4() {}
     float4(float v) : x(v), y(v), z(v), w(v) {}
-    float4(float x0, float y0, float z0, float w0) : x(x0), y(y0), z(z0), w(w0) {}
+    float4(float x0, float y0, float z0, float w0 = 0.f) : x(x0), y(y0), z(z0), w(w0) {}
     void set(float x0, float y0, float z0, float w0)  {
         x = x0, y = y0, z = z0, w = w0;
     }
@@ -43,7 +44,7 @@ struct dim4 {
     uint32_t x = 0u, y = 0u, z = 0u, w = 0u;
     dim4() {}
     dim4(uint32_t v) : x(v), y(v), z(v), w(v) {}
-    dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0) : x(x0), y(y0), z(z0), w(w0) {}
+    dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// basic data type: short4 class
 /**  */
@@ -51,7 +52,7 @@ struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
     short4() {}
     short4(int16_t v) : x(v), y(v), z(v), w(v) {}
-    short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0) : x(x0), y(y0), z(z0), w(w0) {}
+    short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// Volumetric optical properties
 /** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
@@ -61,34 +62,7 @@ struct MCX_medium {
     MCX_medium(float mua0, float mus0) : mua(mua0), mus(mus0) {}
     MCX_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
 };
-/// MCX_rand provides the xorshift128p random number generator
-/**  */
-struct MCX_rand { // per thread
-    uint64_t t[2];
-
-    MCX_rand(dim4 seed) {
-        t[0] = (uint64_t)seed.x << 32 | seed.y;
-        t[1] = (uint64_t)seed.z << 32 | seed.w;
-    }
-    float rand01() { //< advance random state, return a uniformly 0-1 distributed float random number
-        union {
-            uint64_t i;
-            float f[2];
-            uint  u[2];
-        } s1;
-        const uint64_t s0 = t[1];
-        s1.i = t[0];
-        t[0] = s0;
-        s1.i ^= s1.i << 23; // a
-        t[1] = s1.i ^ s0 ^ (s1.i >> 18) ^ (s0 >> 5); // b, c
-        s1.i = t[1] + s0;
-        s1.u[0] = 0x3F800000U | (s1.u[0] >> 9);
-        return s1.f[0] - 1.0f;
-    }
-    float next_scat_len() {
-        return -logf(rand01() + FLT_EPSILON);
-    }
-};
+#pragma omp end declare target
 /// MCX_volume class manages input and output volume
 /** */
 template<class T>
@@ -137,6 +111,35 @@ class MCX_volume { // shared, read-only
         return dimxyzt;
     }
 };
+#pragma omp declare target
+/// MCX_rand provides the xorshift128p random number generator
+/**  */
+struct MCX_rand { // per thread
+    uint64_t t[2];
+
+    MCX_rand(dim4 seed) {
+        t[0] = (uint64_t)seed.x << 32 | seed.y;
+        t[1] = (uint64_t)seed.z << 32 | seed.w;
+    }
+    float rand01() { //< advance random state, return a uniformly 0-1 distributed float random number
+        union {
+            uint64_t i;
+            float f[2];
+            uint  u[2];
+        } s1;
+        const uint64_t s0 = t[1];
+        s1.i = t[0];
+        t[0] = s0;
+        s1.i ^= s1.i << 23; // a
+        t[1] = s1.i ^ s0 ^ (s1.i >> 18) ^ (s0 >> 5); // b, c
+        s1.i = t[1] + s0;
+        s1.u[0] = 0x3F800000U | (s1.u[0] >> 9);
+        return s1.f[0] - 1.0f;
+    }
+    float next_scat_len() {
+        return -logf(rand01() + FLT_EPSILON);
+    }
+};
 /// MCX_photon class performs MC simulation of a single photon
 /** */
 struct MCX_photon { // per thread
@@ -145,12 +148,12 @@ struct MCX_photon { // per thread
     int64_t lastvoxelidx;
     int mediaid;
 
-    MCX_photon(std::vector<float> p0, std::vector<float> v0) { // constructor
-        pos.set(p0[0], p0[1], p0[2], p0.size() > 3 ? p0[3] : 1.f);
-        vec.set(v0[0], v0[1], v0[2], 0.f);
-        rvec.set(1.f / v0[0], 1.f / v0[1], 1.f / v0[2], 1.f);
+    MCX_photon(float4 p0, float4 v0) { // constructor
+        pos = p0;
+        vec = v0;
+        rvec.set(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
         len.set(NAN, 0.f, 0.f, pos.w);
-        ipos = short4((short)p0[0], (short)p0[1], (short)p0[2], -1);
+        ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
         lastvoxelidx = -1;
         mediaid = 0;
     }
@@ -229,7 +232,9 @@ struct MCX_photon { // per thread
         len.x = ran.next_scat_len();
 
         tmp0 = (2.f * M_PI) * ran.rand01(); //next arimuth angle
-        sincosf(tmp0, &sphi, &cphi);
+        sphi = sinf(tmp0);
+        cphi = cosf(tmp0);
+        //sincosf(tmp0, &sphi, &cphi);
 
         if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
             tmp0 = (1.f - prop.g * prop.g) / (1.f - prop.g + 2.f * prop.g * ran.rand01());
@@ -242,7 +247,9 @@ struct MCX_photon { // per thread
             ctheta = tmp0;
         } else {
             theta = acosf(2.f * ran.rand01() - 1.f);
-            sincosf(theta, &stheta, &ctheta);
+            stheta = sinf(theta);
+            ctheta = cosf(theta);
+            //sincosf(theta, &stheta, &ctheta);
         }
 
         rotatevector(stheta, ctheta, sphi, cphi);
@@ -315,6 +322,7 @@ struct MCX_photon { // per thread
         vec.z *= tmp0;
     }
 };
+#pragma omp end declare target
 /// MCX_clock class provides timing information
 /** */
 struct MCX_clock {
@@ -373,12 +381,20 @@ int main(int argn, char* argv[]) {
     }
 
     MCX_clock timer;
-
+    uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
+    dim4 seeds = dim4(std::rand(), std::rand(), std::rand(), std::rand());  //< TODO: need to implement per-thread ran object
+    float4 pos(io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2]);
+    float4 dir(io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2]);
+#ifdef USE_OMP_TARGET
+    #pragma omp target teams distribute parallel for \
+    map(to: inputvol) map(to: prop) map(tofrom: outputvol)
+#else
     #pragma omp parallel for
+#endif
 
-    for (uint64_t i = 0; i < io.cfg["Session"]["Photons"].get<uint64_t>(); i++) {
-        MCX_rand ran(dim4(std::rand(), std::rand(), std::rand(), std::rand()));
-        MCX_photon p(io.cfg["Optode"]["Source"]["Pos"].get<std::vector<float>>(), io.cfg["Optode"]["Source"]["Dir"].get<std::vector<float>>());
+    for (uint64_t i = 0; i < nphoton; i++) {
+        MCX_rand ran(dim4(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i));
+        MCX_photon p(pos, dir);
         p.run(inputvol, outputvol, prop, ran);
 #ifdef DEBUG
         printf("p = [%f %f %f %f] ip= [%d %d %d %d] v=[%f %f %f %f]\n", p.pos.x, p.pos.y, p.pos.z, p.pos.w, p.ipos.x, p.ipos.y, p.ipos.z, p.ipos.w, p.vec.x, p.vec.y, p.vec.z, p.vec.w);
@@ -387,7 +403,6 @@ int main(int argn, char* argv[]) {
 
     printf("simulation completed %.6f ms\n", timer.elapse());
     io.save(outputvol);
-    printf("file saving completed %.6f ms\n", timer.elapse());
     delete [] prop;
     return 0;
 }

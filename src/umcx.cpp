@@ -97,6 +97,11 @@ class MCX_volume { // shared, read-only
         return dimxyzt;
     }
 };
+typedef MCX_volume<int> MCX_inputvol;
+typedef MCX_volume<float> MCX_outputvol;
+//#pragma omp declare mapper(input: MCX_inputvol v) map(v, v.vol[0:v.dimxyzt])
+//#pragma omp declare mapper(output: MCX_outputvol v) map(v, v.vol[0:v.dimxyzt])
+
 #pragma omp declare target
 /// MCX_rand provides the xorshift128p random number generator
 /**  */
@@ -378,8 +383,8 @@ int main(int argn, char* argv[]) {
     }
 
     MCX_userio io(argv[1]);
-    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
-    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
+    MCX_inputvol inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
+    MCX_outputvol outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
     MCX_medium* prop = new MCX_medium[io.cfg["Domain"]["Media"].size()];
 
     for (uint32_t i = 0; i < io.cfg["Domain"]["Media"].size(); i++) {
@@ -396,7 +401,7 @@ int main(int argn, char* argv[]) {
     float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
 #ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for \
-    map(to: inputvol) map(to: prop) map(tofrom: outputvol) reduction(+ : energyescape)
+    map(to: inputvol) map(to: prop) map(tofrom: outputvol) map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape)
 #else
     #pragma omp parallel for reduction(+ : energyescape)
 #endif

@@ -25,6 +25,7 @@ using json = nlohmann::ordered_json;
 #pragma omp declare target
 /// basic data type: float4 class
 /** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
+#ifndef __CUDACC__
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
 };
@@ -38,6 +39,7 @@ struct dim4 {
 struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
 };
+#endif
 /// Volumetric optical properties
 /** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
 struct MCX_medium {
@@ -47,12 +49,11 @@ struct MCX_medium {
 /// MCX_volume class manages input and output volume
 /** */
 template<class T>
-class MCX_volume { // shared, read-only
+struct MCX_volume { // shared, read-only
     dim4 size;
     uint64_t dimxy = 0, dimxyz = 0, dimxyzt = 0;
     T* vol = nullptr;
 
-  public:
     MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
         size = (dim4) {
             Nx, Ny, Nz, Nt
@@ -342,7 +343,7 @@ struct MCX_userio {
     json cfg;
     MCX_userio(std::string finput) {
         if (finput == "cube60") {
-            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
                 {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
                 {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
                 {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}
@@ -401,7 +402,8 @@ int main(int argn, char* argv[]) {
     float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
 #ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for \
-    map(to: inputvol) map(to: prop) map(tofrom: outputvol) map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape)
+    map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
+    map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape)
 #else
     #pragma omp parallel for reduction(+ : energyescape)
 #endif
@@ -413,7 +415,7 @@ int main(int argn, char* argv[]) {
         energyescape += p.pos.w;
     }
 
-    printf("simulation completed %.6f ms, absorption fraction %.6f%%\n", timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
+    printf("simulation completed, speed %.0f photon/ms, duration %.6f ms, absorption fraction %.6f%%\n", nphoton / timer.elapse(), timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
     io.save(outputvol);
     delete [] prop;
     return 0;

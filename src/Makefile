@@ -4,7 +4,7 @@ SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)
 
 nvc: CXX=nvc++
-nvc: CXXFLAGS+=-mp=gpu -Minfo=mp,accel -Minline -DGPU_OFFLOAD
+nvc: CXXFLAGS+=-mp=gpu -Minfo=mp,accel -Minline -gpu=mem:managed -DGPU_OFFLOAD
 amd: CXXFLAGS+=-foffload=amdgcn-amdhsa="-march=gfx906" -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
 nvidia: CXXFLAGS+=-foffload=nvptx-none -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
 nvidia amd nvc: multi

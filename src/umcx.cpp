@@ -376,7 +376,7 @@ struct MCX_userio {
         };
         std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
         std::vector<uint8_t> output_vector;
-        json::to_bjdata(bniifile, outputdata);
+        json::to_bjdata(bniifile, outputdata, true, true);
         outputdata.write((const char*)output_vector.data(), output_vector.size());
     }
 };

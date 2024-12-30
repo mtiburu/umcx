@@ -143,10 +143,10 @@ struct MCX_photon { // per thread
     int64_t lastvoxelidx;
     int mediaid;
 
-    MCX_photon(float4& p0, float4& v0) { // constructor
+    MCX_photon(const float4& p0, const float4& v0) { // constructor
         launch(p0, v0);
     }
-    void launch(float4& p0, float4& v0) { // constructor
+    void launch(const float4& p0, const float4& v0) { // constructor
         pos = p0;
         vec = v0;
         rvec = (float4) {
@@ -402,15 +402,15 @@ int main(int argn, char* argv[]) {
 
     double energyescape = 0.0;
     MCX_clock timer;
-    uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
-    dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
-    float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2], 1.f};
-    float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
+    const uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
+    const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
+    const float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2], 1.f};
+    const float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
 
 #ifdef GPU_OFFLOAD
-    #pragma omp target teams distribute parallel for thread_limit(64) \
+    #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
     map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \
     map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape) firstprivate(ran, p)
 #else

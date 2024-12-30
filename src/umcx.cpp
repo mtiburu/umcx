@@ -110,6 +110,9 @@ struct MCX_rand { // per thread
     uint64_t t[2];
 
     MCX_rand(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3) {
+        reseed(s0, s1, s2, s3);
+    }
+    void reseed(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3) {
         t[0] = (uint64_t)s0 << 32 | s1;
         t[1] = (uint64_t)s2 << 32 | s3;
     }
@@ -141,6 +144,9 @@ struct MCX_photon { // per thread
     int mediaid;
 
     MCX_photon(float4& p0, float4& v0) { // constructor
+        launch(p0, v0);
+    }
+    void launch(float4& p0, float4& v0) { // constructor
         pos = p0;
         vec = v0;
         rvec = (float4) {
@@ -400,17 +406,20 @@ int main(int argn, char* argv[]) {
     dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
     float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2], 1.f};
     float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
+    MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
+    MCX_photon p(pos, dir);
+
 #ifdef GPU_OFFLOAD
-    #pragma omp target teams distribute parallel for \
-    map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
-    map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape)
+    #pragma omp target teams distribute parallel for thread_limit(64) \
+    map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \
+    map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape) firstprivate(ran, p)
 #else
-    #pragma omp parallel for reduction(+ : energyescape)
+    #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
 #endif
 
     for (uint64_t i = 0; i < nphoton; i++) {
-        MCX_rand ran(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
-        MCX_photon p(pos, dir);
+        ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
+        p.launch(pos, dir);
         p.run(inputvol, outputvol, prop, ran);
         energyescape += p.pos.w;
     }

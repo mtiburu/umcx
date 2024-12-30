@@ -238,8 +238,6 @@ struct MCX_photon { // per thread
         len.x = ran.next_scat_len();
 
         tmp0 = (2.f * M_PI) * ran.rand01(); //next arimuth angle
-        //sphi = sinf(tmp0);
-        //cphi = cosf(tmp0);
         sincosf(tmp0, &sphi, &cphi);
 
         if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
@@ -253,8 +251,6 @@ struct MCX_photon { // per thread
             ctheta = tmp0;
         } else {
             theta = acosf(2.f * ran.rand01() - 1.f);
-            //stheta = sinf(theta);
-            //ctheta = cosf(theta);
             sincosf(theta, &stheta, &ctheta);
         }
 
@@ -330,6 +326,10 @@ struct MCX_photon { // per thread
         vec.x *= tmp0;
         vec.y *= tmp0;
         vec.z *= tmp0;
+    }
+    void sincosf(float ang, float* sine, float* cosine) {
+        *sine = sinf(ang);
+        *cosine = cosf(ang);
     }
 };
 #pragma omp end declare target
@@ -408,7 +408,6 @@ int main(int argn, char* argv[]) {
     const float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
-
 #ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
     map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \

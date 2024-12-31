@@ -46,6 +46,12 @@ struct MCX_medium {
     float mua = 0.f, mus = 0.f, g = 1.f, n = 1.f;
 };
 #pragma omp end declare target
+/// Global simulation settings
+/** Stay constant throughout the simulation */
+struct MCX_param {
+    float tstart = 0.f, tend = 5.e-9f, rtstep = 1.f / 5e-9f;
+    int maxgate = 1, isreflect = 1;
+};
 /// MCX_volume class manages input and output volume
 /** */
 template<class T>
@@ -161,28 +167,33 @@ struct MCX_photon { // per thread
         lastvoxelidx = -1;
         mediaid = 0;
     }
-    void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran) { // main function to run a single photon from lunch to termination
+    void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // main function to run a single photon from lunch to termination
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
 
         while (1) {
-            if (sprint(invol, outvol, props, ran)) {
+            if (sprint(invol, outvol, props, ran, gcfg)) {
                 break;
             }
 
             scatter(props[mediaid], ran);
         }
     }
-    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran) { // run from one scattering site to the next, return 1 when terminate
+    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // run from one scattering site to the next, return 1 when terminate
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
 
             if (newvoxelid != lastvoxelidx) { // only save when moving out of a voxel
-                save(outvol);
+                save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))));
+
+                if (len.y > gcfg.tend) {
+                    return 1;
+                }
+
                 int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
 
-                if (props[mediaid].n != props[newmediaid].n) {
+                if (gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
                     if (reflect(props[mediaid].n, props[newmediaid].n, ran) && (newvoxelid < 0 || newmediaid == 0)) {
                         return 1;
                     }
@@ -229,8 +240,8 @@ struct MCX_photon { // per thread
 
         return lastvoxelidx;
     }
-    void save(MCX_volume<float>& outvol) {
-        outvol.add(len.w - pos.w, lastvoxelidx);
+    void save(MCX_volume<float>& outvol, int tshift) {
+        outvol.add(len.w - pos.w, lastvoxelidx + tshift * outvol.dimxyz);
         len.w = pos.w;
     }
     void scatter(MCX_medium& prop, MCX_rand& ran) {
@@ -348,8 +359,8 @@ struct MCX_clock {
 struct MCX_userio {
     json cfg;
     MCX_userio(std::string finput) {
-        if (finput == "cube60") {
-            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+        if (finput == "cube60" || finput == "cube60b") {
+            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(finput == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 1e-9}}},
                 {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
                 {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
                 {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}
@@ -363,12 +374,12 @@ struct MCX_userio {
         json bniifile = {
             {
                 "NIFTIHeader", {
-                    {"Dim", {cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]}}
+                    {"Dim", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}}
                 }
             },
             {
                 "NIFTIData", {
-                    {"_ArraySize_", {cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]}},
+                    {"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
                     {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
                     {"_ArrayData_", std::vector<float>(outputvol.buffer(), outputvol.buffer() + outputvol.count())}
                 }
@@ -390,8 +401,13 @@ int main(int argn, char* argv[]) {
     }
 
     MCX_userio io(argv[1]);
+    const MCX_param gcfg = {
+        /*.tstart*/ io.cfg["Forward"]["T0"].get<float>(), /*.tend*/ io.cfg["Forward"]["T1"].get<float>(), /*.rtstep*/ 1.f / io.cfg["Forward"]["Dt"].get<float>(),
+        /*.maxgate*/ (int)((io.cfg["Forward"]["T1"].get<float>() - io.cfg["Forward"]["T0"].get<float>()) / io.cfg["Forward"]["Dt"].get<float>() + 0.5f),
+        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0)
+    };
     MCX_inputvol inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
-    MCX_outputvol outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2]);
+    MCX_outputvol outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], gcfg.maxgate);
     MCX_medium* prop = new MCX_medium[io.cfg["Domain"]["Media"].size()];
 
     for (uint32_t i = 0; i < io.cfg["Domain"]["Media"].size(); i++) {
@@ -411,7 +427,7 @@ int main(int argn, char* argv[]) {
 #ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
     map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \
-    map(to: pos) map(to: dir) map(to: seeds) reduction(+ : energyescape) firstprivate(ran, p)
+    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) reduction(+ : energyescape) firstprivate(ran, p)
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
 #endif
@@ -419,7 +435,7 @@ int main(int argn, char* argv[]) {
     for (uint64_t i = 0; i < nphoton; i++) {
         ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
         p.launch(pos, dir);
-        p.run(inputvol, outputvol, prop, ran);
+        p.run(inputvol, outputvol, prop, ran, gcfg);
         energyescape += p.pos.w;
     }
 

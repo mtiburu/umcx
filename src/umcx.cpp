@@ -194,7 +194,7 @@ struct MCX_photon { // per thread
                 int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
 
                 if (gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
-                    if (reflect(props[mediaid].n, props[newmediaid].n, ran) && (newvoxelid < 0 || newmediaid == 0)) {
+                    if (reflect(props[mediaid].n, props[newmediaid].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || newmediaid == 0)) {
                         return 1;
                     }
                 } else if (newvoxelid < 0 || newmediaid == 0) {
@@ -306,15 +306,24 @@ struct MCX_photon { // per thread
         vec.y *= tmp0;
         vec.z *= tmp0;
     }
-    int reflect(float n1, float n2, MCX_rand& ran) {
+    int reflect(float n1, float n2, MCX_rand& ran, int64_t& newvoxelid, int& newmediaid) {
         float Rtotal = reflectcoeff(n1, n2);
 
-        if (ran.rand01() > Rtotal) {
-            (ipos.w == 0) ? (vec.x = -vec.x) : ((ipos.w == 1) ? (vec.y = -vec.y) : (vec.z = -vec.z)) ;
-            return 0;
-        } else {
+        if (Rtotal < 1.f && ran.rand01() > Rtotal) {
             transmit(n1, n2);
             return 1;
+        } else {
+            (ipos.w == 0) ? (vec.x = -vec.x, rvec.x = -rvec.x) : ((ipos.w == 1) ? (vec.y = -vec.y, rvec.y = -rvec.y) : (vec.z = -vec.z, rvec.z = -rvec.z)) ;
+            (ipos.w == 0) ?
+            (pos.x = nextafterf((int)(pos.x + 0.5f), (vec.x > 0.f) - (vec.x < 0.f))) :
+            ((ipos.w == 1) ?
+             (pos.y = nextafterf((int)(pos.y + 0.5f), (vec.y > 0.f) - (vec.y < 0.f))) :
+             (pos.z = nextafterf((int)(pos.z + 0.5f), (vec.z > 0.f) - (vec.z < 0.f))));
+            (ipos.w == 0) ? (ipos.x = (short)(pos.x)) : ((ipos.w == 1) ? (ipos.y = (short)(pos.y)) : (ipos.z = (short)(pos.z)));
+
+            newvoxelid = lastvoxelidx;
+            newmediaid = mediaid;
+            return 0;
         }
     }
     void rotatevector(float stheta, float ctheta, float sphi, float cphi) {

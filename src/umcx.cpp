@@ -50,7 +50,7 @@ struct MCX_medium {
 /** Stay constant throughout the simulation */
 struct MCX_param {
     float tstart = 0.f, tend = 5.e-9f, rtstep = 1.f / 5e-9f;
-    int maxgate = 1, isreflect = 1;
+    int maxgate = 1, isreflect = 1, mediumnum = 0;
 };
 /// MCX_volume class manages input and output volume
 /** */
@@ -413,13 +413,14 @@ int main(int argn, char* argv[]) {
     const MCX_param gcfg = {
         /*.tstart*/ io.cfg["Forward"]["T0"].get<float>(), /*.tend*/ io.cfg["Forward"]["T1"].get<float>(), /*.rtstep*/ 1.f / io.cfg["Forward"]["Dt"].get<float>(),
         /*.maxgate*/ (int)((io.cfg["Forward"]["T1"].get<float>() - io.cfg["Forward"]["T0"].get<float>()) / io.cfg["Forward"]["Dt"].get<float>() + 0.5f),
-        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0)
+        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
+        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size()
     };
     MCX_inputvol inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
     MCX_outputvol outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], gcfg.maxgate);
-    MCX_medium* prop = new MCX_medium[io.cfg["Domain"]["Media"].size()];
+    MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
 
-    for (uint32_t i = 0; i < io.cfg["Domain"]["Media"].size(); i++) {
+    for (int i = 0; i < gcfg.mediumnum; i++) {
         prop[i] = (MCX_medium) {
             io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]
         };
@@ -436,7 +437,7 @@ int main(int argn, char* argv[]) {
 #ifdef GPU_OFFLOAD
     #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
     map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \
-    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) reduction(+ : energyescape) firstprivate(ran, p)
+    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p)
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
 #endif

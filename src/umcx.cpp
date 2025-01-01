@@ -435,8 +435,8 @@ int main(int argn, char* argv[]) {
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
-    #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
-    map(alloc: inputvol.vol)  map(to: inputvol.vol[0:inputvol.dimxyzt]) map(alloc: outputvol.vol) map(from: outputvol.vol[0:outputvol.dimxyzt]) \
+    #pragma omp target teams distribute parallel for num_teams(200000/64) num_threads(2) \
+    map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
     map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p)
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)

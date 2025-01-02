@@ -367,7 +367,9 @@ struct MCX_clock {
 /** */
 struct MCX_userio {
     json cfg;
-    MCX_userio(std::string finput) {
+    MCX_userio(char* argv[], int argn) {
+        std::string finput = argv[1];
+
         if (finput == "cube60" || finput == "cube60b") {
             cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(finput == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 1e-9}}},
                 {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
@@ -377,6 +379,10 @@ struct MCX_userio {
         } else {
             std::ifstream inputjson(finput);
             inputjson >> cfg;
+        }
+
+        if (argn > 2) {
+            cfg.update(json::parse(argv[2]), true);
         }
     }
     void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
@@ -405,11 +411,11 @@ struct MCX_userio {
 /////////////////////////////////////////////////
 int main(int argn, char* argv[]) {
     if (argn == 1) {
-        std::cout << "format: umcx input.json" << std::endl;
+        std::cout << "Format: umcx input.json <json options>\n\t\tor\n\tumcx benchmarkname <json options>\n\nAvailable benchmarks include:\n\tcube60\n\tcube60b" << std::endl;
         return 0;
     }
 
-    MCX_userio io(argv[1]);
+    MCX_userio io(argv, argn);
     const MCX_param gcfg = {
         /*.tstart*/ io.cfg["Forward"]["T0"].get<float>(), /*.tend*/ io.cfg["Forward"]["T1"].get<float>(), /*.rtstep*/ 1.f / io.cfg["Forward"]["Dt"].get<float>(),
         /*.maxgate*/ (int)((io.cfg["Forward"]["T1"].get<float>() - io.cfg["Forward"]["T0"].get<float>()) / io.cfg["Forward"]["Dt"].get<float>() + 0.5f),
@@ -435,7 +441,12 @@ int main(int argn, char* argv[]) {
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
-    #pragma omp target teams distribute parallel for num_teams(200000/64) thread_limit(64) \
+#ifdef _LIBGOMP_OMP_LOCK_DEFINED
+    const int gridsize = 200000 / 64, blocksize = 2;
+#else
+    const int gridsize = 200000 / 64, blocksize = 64;
+#endif
+    #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) \
     map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
     map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p)
 #else

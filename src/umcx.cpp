@@ -88,7 +88,7 @@ struct MCX_volume { // shared, read-only
         size = dim4(jnii["NIFTIData"]["_ArraySize_"][0], jnii["NIFTIData"]["_ArraySize_"][1], jnii["NIFTIData"]["_ArraySize_"][2]);
     }
     int64_t index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
-        return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
+        return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (int)(it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
     }
     T& get(int64_t idx) const  { // must be inside the volume
         return vol[idx];
@@ -104,11 +104,6 @@ struct MCX_volume { // shared, read-only
         return dimxyzt;
     }
 };
-typedef MCX_volume<int> MCX_inputvol;
-typedef MCX_volume<float> MCX_outputvol;
-//#pragma omp declare mapper(input: MCX_inputvol v) map(v, v.vol[0:v.dimxyzt])
-//#pragma omp declare mapper(output: MCX_outputvol v) map(v, v.vol[0:v.dimxyzt])
-
 #pragma omp declare target
 /// MCX_rand provides the xorshift128p random number generator
 /**  */
@@ -422,8 +417,8 @@ int main(int argn, char* argv[]) {
         /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
         /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size()
     };
-    MCX_inputvol inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
-    MCX_outputvol outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], gcfg.maxgate);
+    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
+    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], gcfg.maxgate);
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
@@ -442,9 +437,9 @@ int main(int argn, char* argv[]) {
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
-    const int gridsize = 200000 / 64, blocksize = 2;
+    const int gridsize = 200000 / 64, blocksize = 2;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
 #else
-    const int gridsize = 200000 / 64, blocksize = 64;
+    const int gridsize = 200000 / 64, blocksize = 64; // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) \
     map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
@@ -460,7 +455,7 @@ int main(int argn, char* argv[]) {
         energyescape += p.pos.w;
     }
 
-    printf("simulation completed, speed %.0f photon/ms, duration %.6f ms, absorption fraction %.6f%%\n", nphoton / timer.elapse(), timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
+    printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
     io.save(outputvol);
     delete [] prop;
     return 0;

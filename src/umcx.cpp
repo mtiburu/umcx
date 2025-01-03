@@ -381,7 +381,7 @@ struct MCX_userio {
     }
     void benchmark(std::string benchname) {
         if (benchname == "cube60" || benchname == "cube60b") {
-            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(benchname == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 1e-9}}},
+            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(benchname == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
                 {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
                 {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
                 {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}

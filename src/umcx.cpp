@@ -10,6 +10,8 @@
 #include <cfloat>
 #include <math.h>
 #include <chrono>
+#include <set>
+#include <map>
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -20,6 +22,7 @@
 #ifndef M_PI
     #define M_PI 3.14159265358979323846
 #endif
+#define REFLECT_PHOTON(dir) (vec.dir = -vec.dir, rvec.dir = -rvec.dir, pos.dir = nextafterf((int)(pos.dir + 0.5f), (vec.dir > 0.f) - (vec.dir < 0.f)), ipos.dir = (short)(pos.dir))
 
 using json = nlohmann::ordered_json;
 #pragma omp declare target
@@ -105,12 +108,6 @@ struct MCX_volume { // shared, read-only
         #pragma omp atomic
         vol[idx] += val;
     }
-    T* buffer() const  {
-        return vol;
-    }
-    uint64_t count() const  {
-        return dimxyzt;
-    }
 };
 #pragma omp declare target
 /// MCX_rand provides the xorshift128p random number generator
@@ -155,7 +152,7 @@ struct MCX_photon { // per thread
     MCX_photon(const float4& p0, const float4& v0) { // constructor
         launch(p0, v0);
     }
-    void launch(const float4& p0, const float4& v0) { // constructor
+    void launch(const float4& p0, const float4& v0) { // launch photon
         pos = p0;
         vec = v0;
         rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
@@ -164,19 +161,21 @@ struct MCX_photon { // per thread
         lastvoxelidx = -1;
         mediaid = 0;
     }
+    template<const int isreflect>
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // main function to run a single photon from lunch to termination
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
 
         while (1) {
-            if (sprint(invol, outvol, props, ran, gcfg)) {
+            if (sprint<isreflect>(invol, outvol, props, ran, gcfg)) {
                 break;
             }
 
             scatter(props[mediaid], ran);
         }
     }
+    template<const int isreflect>
     int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // run from one scattering site to the next, return 1 when terminate
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
@@ -190,7 +189,7 @@ struct MCX_photon { // per thread
 
                 int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
 
-                if (gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
+                if (isreflect && gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
                     if (reflect(props[mediaid].n, props[newmediaid].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || newmediaid == 0)) {
                         return 1;
                     }
@@ -302,14 +301,7 @@ struct MCX_photon { // per thread
             transmit(n1, n2);
             return 1;
         } else {
-            (ipos.w == 0) ? (vec.x = -vec.x, rvec.x = -rvec.x) : ((ipos.w == 1) ? (vec.y = -vec.y, rvec.y = -rvec.y) : (vec.z = -vec.z, rvec.z = -rvec.z)) ;
-            (ipos.w == 0) ?
-            (pos.x = nextafterf((int)(pos.x + 0.5f), (vec.x > 0.f) - (vec.x < 0.f))) :
-            ((ipos.w == 1) ?
-             (pos.y = nextafterf((int)(pos.y + 0.5f), (vec.y > 0.f) - (vec.y < 0.f))) :
-             (pos.z = nextafterf((int)(pos.z + 0.5f), (vec.z > 0.f) - (vec.z < 0.f))));
-            (ipos.w == 0) ? (ipos.x = (short)(pos.x)) : ((ipos.w == 1) ? (ipos.y = (short)(pos.y)) : (ipos.z = (short)(pos.z)));
-
+            (ipos.w == 0) ? REFLECT_PHOTON(x) : ((ipos.w == 1) ? REFLECT_PHOTON(y) : REFLECT_PHOTON(z));
             newvoxelid = lastvoxelidx;
             newmediaid = mediaid;
             return 0;
@@ -352,23 +344,53 @@ struct MCX_clock {
 /** */
 struct MCX_userio {
     json cfg;
-    MCX_userio(char* argv[], int argn) {
+    const std::map<std::set<std::string>, std::string> cmdflags = {{{"-n", "--photon"}, "/Session/Photons"}, {{"-b", "--reflect"}, "/Session/DoMismatch"},
+        {{"-u", "--unitinmm"}, "/Domain/LengthUnit"}, {{"-U", "--normalize"}, "/Session/DoNormalize"}, {{"-E", "--seed"}, "/Session/RNGSeed"}, {{"-O", "--outputtype"}, "/Session/OutputType"},
+        {{"-d", "--savedet"}, "/Session/DoPartialPath"}
+    };
+
+    MCX_userio(char* argv[], int argn = 1) {
         std::string finput = argv[1];
 
-        if (finput == "cube60" || finput == "cube60b") {
-            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(finput == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 1e-9}}},
+        if (finput[0] == '-') {
+            int i = 1;
+
+            while (i < argn) {
+                std::string arg(argv[i++]);
+
+                if (arg == "-f" || arg == "--input") {
+                    loadfromfile(argv[i++]);
+                } else if (arg == "--bench") {
+                    benchmark(argv[i++]);
+                } else if (arg == "-j" || arg == "--json") {
+                    cfg.update(json::parse(argv[i++]), true);
+                } else if (arg[0] == '-') {
+                    for ( const auto& opts : cmdflags ) {
+                        if (opts.first.find(arg) != opts.first.end()) {
+                            cfg[json::json_pointer(opts.second)] = json::parse(argv[i++]);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (finput == "cube60" || finput == "cube60b") {
+            benchmark(finput);
+        } else {
+            loadfromfile(finput);
+        }
+    }
+    void benchmark(std::string benchname) {
+        if (benchname == "cube60" || benchname == "cube60b") {
+            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(benchname == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 1e-9}}},
                 {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
                 {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
                 {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}
             };
-        } else {
-            std::ifstream inputjson(finput);
-            inputjson >> cfg;
         }
-
-        if (argn > 2) {
-            cfg.update(json::parse(argv[2]), true);
-        }
+    }
+    void loadfromfile(std::string finput) {
+        std::ifstream inputjson(finput);
+        inputjson >> cfg;
     }
     void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
         json bniifile = {
@@ -376,7 +398,7 @@ struct MCX_userio {
             {
                 "NIFTIData", {{"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
                     {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
-                    {"_ArrayData_", std::vector<float>(outputvol.buffer(), outputvol.buffer() + outputvol.count())}
+                    {"_ArrayData_", std::vector<float>(outputvol.vol, outputvol.vol + outputvol.dimxyzt)}
                 }
             }
         };
@@ -434,7 +456,13 @@ int main(int argn, char* argv[]) {
     for (uint64_t i = 0; i < nphoton; i++) {
         ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
         p.launch(pos, dir);
-        p.run(inputvol, outputvol, prop, ran, gcfg);
+
+        if (gcfg.isreflect) {
+            p.run<1>(inputvol, outputvol, prop, ran, gcfg);
+        } else {
+            p.run<0>(inputvol, outputvol, prop, ran, gcfg);
+        }
+
         energyescape += p.pos.w;
     }
 

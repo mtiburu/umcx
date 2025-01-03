@@ -447,8 +447,8 @@ int main(int argn, char* argv[]) {
     const int gridsize = 200000 / 64, blocksize = 64; // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) \
-    map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
-    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p)
+    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p) \
+    map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt])
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
 #endif

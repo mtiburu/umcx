@@ -6,8 +6,10 @@ OBJS = $(SRC:.cpp=.o)
 nvc: CXX=nvc++
 nvc: CXXFLAGS+=-mp=gpu -Minfo=mp,accel -Minline -gpu=mem:managed -DGPU_OFFLOAD
 amd: CXXFLAGS+=-foffload=amdgcn-amdhsa="-march=gfx906" -foffload="-lm" -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
+nvidiaclang: CXX=clang++-15
+nvidiaclang: CXXFLAGS+=--offload=nvptx-none -fopenmp-targets=nvptx64 -DGPU_OFFLOAD
 nvidia: CXXFLAGS+=-foffload=nvptx-none -foffload="-lm" -fcf-protection=none -fno-stack-protector -DGPU_OFFLOAD
-nvidia amd nvc: omp
+nvidiaclang nvidia amd nvc: omp
 
 omp: CXXFLAGS+=-fopenmp
 debugmulti multi: omp

@@ -161,7 +161,7 @@ struct MCX_photon { // per thread
         lastvoxelidx = -1;
         mediaid = 0;
     }
-    template<const int isreflect>
+    template<const bool isreflect>
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // main function to run a single photon from lunch to termination
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
         mediaid = invol.get(lastvoxelidx);
@@ -175,7 +175,7 @@ struct MCX_photon { // per thread
             scatter(props[mediaid], ran);
         }
     }
-    template<const int isreflect>
+    template<const bool isreflect>
     int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) { // run from one scattering site to the next, return 1 when terminate
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
@@ -349,10 +349,10 @@ struct MCX_userio {
         {{"-d", "--savedet"}, "/Session/DoPartialPath"}
     };
 
-    MCX_userio(char* argv[], int argn = 1) {
+    MCX_userio(char* argv[], int argn = 1) {   // parsing command line
         std::string finput = argv[1];
 
-        if (finput[0] == '-') {
+        if (finput[0] == '-') {  // format 1: umcx -flag1 jsonvalue1 -flag2 jsonvalue2 --longflag3 jsonvalue3 ....
             int i = 1;
 
             while (i < argn) {
@@ -373,9 +373,9 @@ struct MCX_userio {
                     }
                 }
             }
-        } else if (finput == "cube60" || finput == "cube60b") {
+        } else if (finput == "cube60" || finput == "cube60b") { // format 2: umcx benchmarkname
             benchmark(finput);
-        } else {
+        } else {                                                // format 3: umcx input.json
             loadfromfile(finput);
         }
     }
@@ -458,9 +458,9 @@ int main(int argn, char* argv[]) {
         p.launch(pos, dir);
 
         if (gcfg.isreflect) {
-            p.run<1>(inputvol, outputvol, prop, ran, gcfg);
+            p.run<true>(inputvol, outputvol, prop, ran, gcfg);
         } else {
-            p.run<0>(inputvol, outputvol, prop, ran, gcfg);
+            p.run<false>(inputvol, outputvol, prop, ran, gcfg);
         }
 
         energyescape += p.pos.w;

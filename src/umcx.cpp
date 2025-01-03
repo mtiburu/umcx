@@ -28,22 +28,34 @@ using json = nlohmann::ordered_json;
 #ifndef __CUDACC__
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
+    float4() {}
+    float4(float x0, float y0, float z0, float w0) : x(x0), y(y0), z(z0), w(w0) {}
+    float4& operator*=(float scale) {
+        x *= scale, y *= scale, z *= scale;
+        return *this;
+    }
 };
 /// basic data type: dim4 class
 /** dim4 is used to represent array dimensions, with 4x uint32_t members {x,y,z,w} */
 struct dim4 {
     uint32_t x = 0u, y = 0u, z = 0u, w = 0u;
+    dim4() {}
+    dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// basic data type: short4 class
 /**  */
 struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
+    short4() {}
+    short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 #endif
 /// Volumetric optical properties
 /** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
 struct MCX_medium {
     float mua = 0.f, mus = 0.f, g = 1.f, n = 1.f;
+    MCX_medium() {}
+    MCX_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
 };
 #pragma omp end declare target
 /// Global simulation settings
@@ -61,9 +73,7 @@ struct MCX_volume { // shared, read-only
     T* vol = nullptr;
 
     MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
-        size = (dim4) {
-            Nx, Ny, Nz, Nt
-        };
+        size = dim4(Nx, Ny, Nz, Nt);
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
         dimxyzt = dimxyz * Nt;
@@ -75,9 +85,7 @@ struct MCX_volume { // shared, read-only
             }
     }
     ~MCX_volume () {
-        size = (dim4) {
-            0, 0, 0, 0
-        };
+        size = dim4(0, 0, 0, 0);
         delete [] vol;
         vol = nullptr;
     }
@@ -150,15 +158,9 @@ struct MCX_photon { // per thread
     void launch(const float4& p0, const float4& v0) { // constructor
         pos = p0;
         vec = v0;
-        rvec = (float4) {
-            1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f
-        };
-        len = (float4) {
-            NAN, 0.f, 0.f, pos.w
-        };
-        ipos = (short4) {
-            (short)p0.x, (short)p0.y, (short)p0.z, -1
-        };
+        rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
+        len = float4(NAN, 0.f, 0.f, pos.w);
+        ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
         lastvoxelidx = -1;
         mediaid = 0;
     }
@@ -218,9 +220,7 @@ struct MCX_photon { // per thread
         htime[0] = fminf(htime[0], len.x);
         htime[1] = (htime[0] != len.x); // is continue next voxel?
         dist = (prop.mus == 0.f) ? dist : (htime[0] / prop.mus);
-        pos = (float4) {
-            pos.x + dist* vec.x, pos.y + dist* vec.y, pos.z + dist* vec.z, pos.w* expf(-prop.mua * dist)
-        };
+        pos = float4(pos.x + dist * vec.x, pos.y + dist * vec.y, pos.z + dist * vec.z, pos.w * expf(-prop.mua * dist));
 
         len.x -= htime[0];
         len.y += dist * prop.n * ONE_OVER_C0;
@@ -261,9 +261,7 @@ struct MCX_photon { // per thread
         }
 
         rotatevector(stheta, ctheta, sphi, cphi);
-        rvec = (float4) {
-            1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f
-        };
+        rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f);
         vec.w++; // stops at 16777216 due to finite precision
     }
     float reflectcoeff(float n1, float n2) {
@@ -288,18 +286,14 @@ struct MCX_photon { // per thread
     void transmit(float n1, float n2) {
         float tmp0 = n1 / n2;
 
-        vec.x *= tmp0;
-        vec.y *= tmp0;
-        vec.z *= tmp0;
+        vec *= tmp0;
         (ipos.w == 0) ?
         (vec.x = ((tmp0 = vec.y * vec.y + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.x > 0.f) - (vec.x < 0.f)) : 0.f) :
         ((ipos.w == 1) ?
          (vec.y = ((tmp0 = vec.x * vec.x + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.y > 0.f) - (vec.y < 0.f)) : 0.f) :
          (vec.z = ((tmp0 = vec.x * vec.x + vec.y * vec.y) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.z > 0.f) - (vec.z < 0.f)) : 0.f));
         tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
-        vec.x *= tmp0;
-        vec.y *= tmp0;
-        vec.z *= tmp0;
+        vec *= tmp0;
     }
     int reflect(float n1, float n2, MCX_rand& ran, int64_t& newvoxelid, int& newmediaid) {
         float Rtotal = reflectcoeff(n1, n2);
@@ -325,22 +319,18 @@ struct MCX_photon { // per thread
         if ( vec.z > -1.f + FLT_EPSILON && vec.z < 1.f - FLT_EPSILON ) {
             float tmp0 = 1.f - vec.z * vec.z;
             float tmp1 = stheta / sqrtf(tmp0);
-            vec = (float4) {
-                tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x* ctheta,
-                     tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y* ctheta,
-                     -tmp1* tmp0* cphi                          + vec.z* ctheta,
-                     vec.w
-            };
+            vec = float4(
+                      tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x * ctheta,
+                      tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y * ctheta,
+                      -tmp1 * tmp0 * cphi                          + vec.z * ctheta,
+                      vec.w
+                  );
         } else {
-            vec = (float4) {
-                stheta* cphi, stheta* sphi, (vec.z > 0.f) ? ctheta : -ctheta, vec.w
-            };
+            vec = float4(stheta * cphi, stheta * sphi, (vec.z > 0.f) ? ctheta : -ctheta, vec.w);
         }
 
         float tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
-        vec.x *= tmp0;
-        vec.y *= tmp0;
-        vec.z *= tmp0;
+        vec *= tmp0;
     }
     void sincosf(float ang, float* sine, float* cosine) {
         *sine = sinf(ang);
@@ -382,14 +372,9 @@ struct MCX_userio {
     }
     void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
         json bniifile = {
+            { "NIFTIHeader", {{"Dim", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}}}},
             {
-                "NIFTIHeader", {
-                    {"Dim", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}}
-                }
-            },
-            {
-                "NIFTIData", {
-                    {"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
+                "NIFTIData", {{"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
                     {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
                     {"_ArrayData_", std::vector<float>(outputvol.buffer(), outputvol.buffer() + outputvol.count())}
                 }
@@ -422,9 +407,7 @@ int main(int argn, char* argv[]) {
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
-        prop[i] = (MCX_medium) {
-            io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]
-        };
+        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
     }
 
     double energyescape = 0.0;

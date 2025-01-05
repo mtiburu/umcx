@@ -1,4 +1,4 @@
-CXXFLAGS += -g -Wall -Wextra -pedantic -std=c++14 -O3
+CXXFLAGS += -g -Wall -Wextra -pedantic -std=c++11 -O3
 BINARY = umcx
 SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)

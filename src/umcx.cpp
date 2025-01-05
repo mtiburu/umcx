@@ -19,10 +19,13 @@
 #include "nlohmann/json.hpp"
 
 #define ONE_OVER_C0             3.335640951981520e-12f
-#ifndef M_PI
-    #define M_PI 3.14159265358979323846
+#ifndef FLT_PI
+    #define FLT_PI 3.14159265358979323846f
 #endif
-#define REFLECT_PHOTON(dir) (vec.dir = -vec.dir, rvec.dir = -rvec.dir, pos.dir = nextafterf((int)(pos.dir + 0.5f), (vec.dir > 0.f) - (vec.dir < 0.f)), ipos.dir = (short)(pos.dir))
+#define REFLECT_PHOTON(dir)  (vec.dir = -vec.dir, rvec.dir = -rvec.dir, pos.dir = nextafterf((int)(pos.dir + 0.5f), (vec.dir > 0.f) - (vec.dir < 0.f)), ipos.dir = (short)(pos.dir))
+#define TRANSMIT_PHOTON(dir) (vec.dir = ((tmp0 = vec.x * vec.x + vec.y * vec.y + vec.z * vec.z - vec.dir * vec.dir) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.dir > 0.f) - (vec.dir < 0.f)) : 0.f)
+#define JNUM(o, key1, key2) (o[key1][key2].get<float>())
+#define JVAL(o, key1, type) (o[key1].get<type>())
 
 using json = nlohmann::ordered_json;
 #pragma omp declare target
@@ -64,8 +67,8 @@ struct MCX_medium {
 /// Global simulation settings
 /** Stay constant throughout the simulation */
 struct MCX_param {
-    float tstart = 0.f, tend = 5.e-9f, rtstep = 1.f / 5e-9f;
-    int maxgate = 1, isreflect = 1, mediumnum = 0;
+    float tstart, tend, rtstep;
+    int maxgate, isreflect, mediumnum;
 };
 /// MCX_volume class manages input and output volume
 /** */
@@ -75,28 +78,33 @@ struct MCX_volume { // shared, read-only
     uint64_t dimxy = 0, dimxyz = 0, dimxyzt = 0;
     T* vol = nullptr;
 
+    MCX_volume() {}
+    MCX_volume(MCX_volume& v) {
+        size = v.size;
+        reshape(size.x, size.y, size.z, size.w);
+        std::memcpy(vol, v.vol, sizeof(T)*dimxyzt);
+    }
     MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
+        reshape(Nx, Ny, Nz, Nt, value);
+    }
+    void reshape(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
         size = dim4(Nx, Ny, Nz, Nt);
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
         dimxyzt = dimxyz * Nt;
+
+        if (vol) {
+            delete [] vol;
+        }
+
         vol = new T[dimxyzt]();
 
-        if (value != 0)
-            for (uint64_t i = 0; i < dimxyzt; i++) {
-                vol[i] = value;
-            }
+        for (uint64_t i = 0; i < dimxyzt; i++) {
+            vol[i] = value;
+        }
     }
     ~MCX_volume () {
-        size = dim4(0, 0, 0, 0);
         delete [] vol;
-        vol = nullptr;
-    }
-    void loadfromjnii (std::string fname) {
-        std::ifstream inputjnii(fname);
-        json jnii;
-        inputjnii >> jnii;
-        size = dim4(jnii["NIFTIData"]["_ArraySize_"][0], jnii["NIFTIData"]["_ArraySize_"][1], jnii["NIFTIData"]["_ArraySize_"][2]);
     }
     int64_t index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
         return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (int)(it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
@@ -107,6 +115,9 @@ struct MCX_volume { // shared, read-only
     void add(T val, int64_t idx) const  {
         #pragma omp atomic
         vol[idx] += val;
+    }
+    void mask(T val, int64_t idx) const  {
+        vol[idx] = (val > 0.) ? val : vol[idx];
     }
 };
 #pragma omp declare target
@@ -242,7 +253,7 @@ struct MCX_photon { // per thread
         float tmp0, sphi, cphi, theta, stheta, ctheta;
         len.x = ran.next_scat_len();
 
-        tmp0 = (2.f * M_PI) * ran.rand01(); //next arimuth angle
+        tmp0 = (2.f * FLT_PI) * ran.rand01(); //next arimuth angle
         sincosf(tmp0, &sphi, &cphi);
 
         if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
@@ -286,11 +297,7 @@ struct MCX_photon { // per thread
         float tmp0 = n1 / n2;
 
         vec *= tmp0;
-        (ipos.w == 0) ?
-        (vec.x = ((tmp0 = vec.y * vec.y + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.x > 0.f) - (vec.x < 0.f)) : 0.f) :
-        ((ipos.w == 1) ?
-         (vec.y = ((tmp0 = vec.x * vec.x + vec.z * vec.z) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.y > 0.f) - (vec.y < 0.f)) : 0.f) :
-         (vec.z = ((tmp0 = vec.x * vec.x + vec.y * vec.y) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.z > 0.f) - (vec.z < 0.f)) : 0.f));
+        (ipos.w == 0) ? TRANSMIT_PHOTON(x) : ((ipos.w == 1) ? TRANSMIT_PHOTON(y) : TRANSMIT_PHOTON(z));
         tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
         vec *= tmp0;
     }
@@ -311,12 +318,10 @@ struct MCX_photon { // per thread
         if ( vec.z > -1.f + FLT_EPSILON && vec.z < 1.f - FLT_EPSILON ) {
             float tmp0 = 1.f - vec.z * vec.z;
             float tmp1 = stheta / sqrtf(tmp0);
-            vec = float4(
-                      tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x * ctheta,
-                      tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y * ctheta,
-                      -tmp1 * tmp0 * cphi                          + vec.z * ctheta,
-                      vec.w
-                  );
+            vec = float4(tmp1 * (vec.x * vec.z * cphi - vec.y * sphi) + vec.x * ctheta,
+                         tmp1 * (vec.y * vec.z * cphi + vec.x * sphi) + vec.y * ctheta,
+                         -tmp1 * tmp0 * cphi                          + vec.z * ctheta,
+                         vec.w);
         } else {
             vec = float4(stheta * cphi, stheta * sphi, (vec.z > 0.f) ? ctheta : -ctheta, vec.w);
         }
@@ -344,11 +349,27 @@ struct MCX_clock {
 /** */
 struct MCX_userio {
     json cfg;
+    MCX_volume<int> domain;
     const std::map<std::set<std::string>, std::string> cmdflags = {{{"-n", "--photon"}, "/Session/Photons"}, {{"-b", "--reflect"}, "/Session/DoMismatch"},
         {{"-u", "--unitinmm"}, "/Domain/LengthUnit"}, {{"-U", "--normalize"}, "/Session/DoNormalize"}, {{"-E", "--seed"}, "/Session/RNGSeed"}, {{"-O", "--outputtype"}, "/Session/OutputType"},
         {{"-d", "--savedet"}, "/Session/DoPartialPath"}
     };
-
+    const std::map<std::string, std::function<int(float4 p, json obj)>> shapeparser = {
+        {"Sphere", [](float4 p, json obj) -> int { return ((p.x - JNUM(obj, "O", 0)) * (p.x - JNUM(obj, "O", 0)) + (p.y - JNUM(obj, "O", 1)) * (p.y - JNUM(obj, "O", 1)) + (p.z - JNUM(obj, "O", 2)) * (p.z - JNUM(obj, "O", 2)) < (JVAL(obj, "R", float) * JVAL(obj, "R", float))) ? JVAL(obj, "Tag", int) : std::numeric_limits<int>::quiet_NaN(); }},
+        {"Box", [](float4 p, json obj) -> int { return !(p.x < JNUM(obj, "O", 0) || p.y < JNUM(obj, "O", 1) || p.z < JNUM(obj, "O", 2) || p.x > JNUM(obj, "O", 0) + JNUM(obj, "Sip.ze", 0) || p.x > JNUM(obj, "O", 1) + JNUM(obj, "Sip.ze", 1) || p.x > JNUM(obj, "O", 2) + JNUM(obj, "Sip.ze", 2)) ? JVAL(obj, "Tag", int) : std::numeric_limits<int>::quiet_NaN(); }},
+        {"XLayers", [](float4 p, json obj) -> int { return (p.x >= JVAL(obj, 0, float) && p.x <= JVAL(obj, 1, float)) ? obj[2].get<int>() : std::numeric_limits<int>::quiet_NaN(); }},
+        {"YLayers", [](float4 p, json obj) -> int { return (p.y >= JVAL(obj, 0, float) && p.y <= JVAL(obj, 1, float)) ? obj[2].get<int>() : std::numeric_limits<int>::quiet_NaN(); }},
+        {"ZLayers", [](float4 p, json obj) -> int { return (p.z >= JVAL(obj, 0, float) && p.z <= JVAL(obj, 1, float)) ? obj[2].get<int>() : std::numeric_limits<int>::quiet_NaN(); }},
+        {
+            "Cylinder", [](float4 p, json obj) -> int {
+                const float d0 = (JNUM(obj, "C1", 0) - JNUM(obj, "C0", 0)) * (JNUM(obj, "C1", 0) - JNUM(obj, "C0", 0)) + (JNUM(obj, "C1", 1) - JNUM(obj, "C0", 1)) * (JNUM(obj, "C1", 1) - JNUM(obj, "C0", 1)) + (JNUM(obj, "C1", 2) - JNUM(obj, "C0", 2)) * (JNUM(obj, "C1", 2) - JNUM(obj, "C0", 2));
+                const float4 v0((JNUM(obj, "C1", 0) - JNUM(obj, "C0", 0)) / sqrtf(d0), (JNUM(obj, "C1", 1) - JNUM(obj, "C0", 1)) / sqrtf(d0), (JNUM(obj, "C1", 2) - JNUM(obj, "C0", 2)) / sqrtf(d0), 0.f);
+                float4 p0((p.x - JNUM(obj, "C0", 0)), (p.y - JNUM(obj, "C0", 1)), (p.z - JNUM(obj, "C0", 2)), d0);
+                float d = v0.x * p0.x + v0.y * p0.y + v0.z * p0.z;
+                return (d <= p0.w && d >= 0.f && p0.x * p0.x + p0.y * p0.y + p0.z * p0.z - d * d <= JVAL(obj, "R", float) * JVAL(obj, "R", float)) ? JVAL(obj, "Tag", int) : std::numeric_limits<int>::quiet_NaN();
+            }
+        }
+    };
     MCX_userio(char* argv[], int argn = 1) {   // parsing command line
         std::string finput = argv[1];
 
@@ -373,35 +394,102 @@ struct MCX_userio {
                     }
                 }
             }
-        } else if (finput == "cube60" || finput == "cube60b") { // format 2: umcx benchmarkname
+        } else if (finput.find(".") == std::string::npos) { // format 2: umcx benchmarkname
             benchmark(finput);
         } else {                                                // format 3: umcx input.json
             loadfromfile(finput);
         }
+
+        initdomain();
+    }
+    void initdomain() {
+        domain.reshape(cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]);
+
+        if (cfg.contains("Shapes")) {
+            if (!cfg["Shapes"].contains("_ArraySize_")) {
+                json shapes = cfg["Shapes"].is_array() ? cfg["Shapes"][0] : cfg["Shapes"];
+
+                if (shapes.contains("Grid")) {
+                    domain.reshape(shapes["Grid"]["Size"][0], shapes["Grid"]["Size"][1], shapes["Grid"]["Size"][2], 1, shapes["Grid"]["Tag"]);
+
+                    if ((cfg["Shapes"].is_array() && cfg["Shapes"].size() == 1) || cfg["Shapes"].is_object()) {
+                        return;
+                    }
+                }
+
+                for (const auto& obj : cfg["Shapes"]) {
+                    #pragma omp parallel for collapse(2)
+
+                    for (uint32_t x = 0; x < domain.size.x; x++)
+                        for (uint32_t y = 0; y < domain.size.y; y++)
+                            for (uint32_t z = 0; z < domain.size.z; z++) {
+                                if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
+                                    int64_t idx = domain.index(x, y, z);
+
+                                    if (obj.begin().key().find("Layers") == 1) {
+                                        for (auto layer : obj.front().items()) {
+                                            int label = shapeparser.at(obj.begin().key())(float4(x + 0.5f, y + 0.5f, z + 0.5f, 0.f), layer.value());
+                                            domain.mask((!std::isnan(label) ? label : 0), idx);
+                                        }
+                                    } else {
+                                        int label = shapeparser.at(obj.begin().key())(float4(x + 0.5f, y + 0.5f, z + 0.5f, 0.f), obj.front());
+                                        domain.mask((!std::isnan(label) ? label : 0), idx);
+                                    }
+                                }
+                            }
+                }
+            } else {
+                domain.reshape(cfg["Shapes"]["_ArraySize_"][0], cfg["Shapes"]["_ArraySize_"][1], cfg["Shapes"]["_ArraySize_"][2]);
+            }
+        }
+
+        save<int>(domain, "vol.bnii");
     }
     void benchmark(std::string benchname) {
-        if (benchname == "cube60" || benchname == "cube60b") {
-            cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 10000000}, {"DoMismatch", (int)(benchname == "cube60b")}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
-                {"Domain", {{"Media", { {{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}}}, {"Dim", {60, 60, 60}}}},
-                {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}},
-                {"Shapes", {{"Grid", {{"Tag", 1}, {"Size", {60, 60, 60}}}}}}
+        cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 1000000}, {"RNGSeed", 1648335518}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+            {"Domain", {{"Media", {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.002}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.0}}}}, {"Dim", {60, 60, 60}}}},
+            {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}}
+        };
+        cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}])"_json;
+        cfg["Session"]["DoMismatch"] = !((int)(benchname == "cube60" || benchname == "skinvessel" || benchname == "spherebox"));
+
+        if (benchname == "cubesph60b") {
+            cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}, {"Sphere": {"O": [30, 30, 30], "R": 15, "Tag": 2}}])"_json;
+        } else if (benchname == "skinvessel") {
+            cfg["Shapes"] = R"([{"Grid": {"Size": [200, 200, 200], "Tag": 1}}, {"ZLayers": [[1, 20, 1], [21, 32, 4], [33, 200, 3]]}, {"Cylinder": {"Tag": 2, "C0": [0, 100.5, 100.5], "C1": [200, 100.5, 100.5], "R": 20}}])"_json;
+            cfg["Forward"] = {{"T0", 0.0}, {"T1", 5e-8}, {"Dt", 5e-8}};
+            cfg["Optode"]["Source"] = {{"Type", "disk"}, {"Pos", {100, 100, 20}}, {"Dir", {0, 0, 1}}, {"Param1", {60, 0, 0, 0}}};
+            cfg["Domain"]["LengthUnit"] = 0.005;
+            cfg["Domain"]["Media"] = {{{"mua", 1e-5}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 3.564e-05}, {"mus", 1.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 23.05426549}, {"mus", 9.398496241}, {"g", 0.9}, {"n", 1.37}},
+                {{"mua", 0.04584957865}, {"mus", 35.65405549}, {"g", 0.9}, {"n", 1.37}}, {{"mua", 1.657237447}, {"mus", 37.59398496}, {"g", 0.9}, {"n", 1.37}}
             };
+        } else if (benchname == "sphshells") {
+            cfg["Shapes"] = R"([{"Grid": {"Size": [60, 60, 60], "Tag": 1}}, {"Sphere": {"O": [30, 30, 30], "R": 25, "Tag": 2}}, {"Sphere": {"O": [30, 30, 30], "R": 23, "Tag": 3}}, {"Sphere": {"O": [30, 30, 30], "R": 10, "Tag": 4}}])"_json;
+            cfg["Domain"]["Media"] = {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.02}, {"mus", 7.0}, {"g", 0.89}, {"n", 1.37}}, {{"mua", 0.004}, {"mus", 0.09}, {"g", 0.89}, {"n", 1.37}},
+                {{"mua", 0.02}, {"mus", 9.0}, {"g", 0.89}, {"n", 1.37}}, {{"mua", 0.05}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.37}}
+            };
+        } else if (benchname == "spherebox") {
+            cfg["Forward"]["Dt"] = 1e-10;
+            cfg["Domain"]["Media"] = {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.002}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.005}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.37}}};
+            cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}, {"Sphere": {"O": [30, 30, 30], "R": 10, "Tag": 2}}])"_json;
         }
     }
     void loadfromfile(std::string finput) {
         std::ifstream inputjson(finput);
         inputjson >> cfg;
     }
-    void save(MCX_volume<float>& outputvol, std::string outputfile = "output.bnii") {
+    template<class T>
+    void save(MCX_volume<T>& outputvol, std::string outputfile = "output.bnii") {
         json bniifile = {
             { "NIFTIHeader", {{"Dim", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}}}},
             {
                 "NIFTIData", {{"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
                     {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
-                    {"_ArrayData_", std::vector<float>(outputvol.vol, outputvol.vol + outputvol.dimxyzt)}
+                    {"_ArrayData_", std::vector<T>(outputvol.vol, outputvol.vol + outputvol.dimxyzt)}
                 }
             }
         };
+        bniifile["NIFTIData"]["_ArrayType_"] = ((std::string(typeid(T).name()) == "f") ? "single" : "int32");
         std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
         std::vector<uint8_t> output_vector;
         json::to_bjdata(bniifile, outputdata, true, true);
@@ -424,27 +512,27 @@ int main(int argn, char* argv[]) {
         /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
         /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size()
     };
-    MCX_volume<int> inputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], 1, 1);
-    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0], io.cfg["Domain"]["Dim"][1], io.cfg["Domain"]["Dim"][2], gcfg.maxgate);
+    MCX_volume<int> inputvol = io.domain;
+    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
-        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"], io.cfg["Domain"]["Media"][i]["mus"], io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
+        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"].get<float>(), io.cfg["Domain"]["Media"][i]["mus"].get<float>(), io.cfg["Domain"]["Media"][i]["g"].get<float>(), io.cfg["Domain"]["Media"][i]["n"].get<float>());
     }
 
     double energyescape = 0.0;
     MCX_clock timer;
     const uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
     const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
-    const float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0], io.cfg["Optode"]["Source"]["Pos"][1], io.cfg["Optode"]["Source"]["Pos"][2], 1.f};
-    const float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0], io.cfg["Optode"]["Source"]["Dir"][1], io.cfg["Optode"]["Source"]["Dir"][2], 0.f};
+    const float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0].get<float>(), io.cfg["Optode"]["Source"]["Pos"][1].get<float>(), io.cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};
+    const float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0].get<float>(), io.cfg["Optode"]["Source"]["Dir"][1].get<float>(), io.cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
-    const int gridsize = 200000 / 64, blocksize = 2;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
+    const int gridsize = 100000 / 64, blocksize = 2;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
 #else
-    const int gridsize = 200000 / 64, blocksize = 64; // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
+    const int gridsize = 100000 / 64, blocksize = 64; // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) \
     map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p) \
@@ -467,7 +555,7 @@ int main(int argn, char* argv[]) {
     }
 
     printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
-    io.save(outputvol);
+    io.save<float>(outputvol);
     delete [] prop;
     return 0;
 }

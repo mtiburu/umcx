@@ -168,11 +168,7 @@ struct MCX_photon { // per thread
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
 
-        while (1) {
-            if (sprint<isreflect>(invol, outvol, props, ran, gcfg)) {
-                break;
-            }
-
+        while (sprint<isreflect>(invol, outvol, props, ran, gcfg) == 0) {
             scatter(props[mediaid], ran);
         }
     }
@@ -181,27 +177,25 @@ struct MCX_photon { // per thread
         while (len.x > 0.f) {
             int64_t newvoxelid = step(invol, props[mediaid]);
 
-            if (newvoxelid != lastvoxelidx) { // only save when moving out of a voxel
+            if (newvoxelid != lastvoxelidx) {   // only save when moving out of a voxel
                 save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))), props[mediaid].mua, gcfg);
 
                 if (len.y > gcfg.tend) {
-                    return 1;
+                    return 1;                   // terminating photon due to exceeding maximum time gate
                 }
 
                 int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
 
                 if (isreflect && gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
                     if (reflect(props[mediaid].n, props[newmediaid].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || newmediaid == 0)) {
-                        return 1;
+                        return 1;               // terminating photon due to transmitting to background at boundary
                     }
                 } else if (newvoxelid < 0 || newmediaid == 0) {
-                    return 1;
+                    return 1;                   // terminating photon due to continue moving to 0-valued voxel or out of domain
                 }
 
-                lastvoxelidx = newvoxelid; // save last saving site
+                lastvoxelidx = newvoxelid;      // save last saving site
                 mediaid = newmediaid;
-            } else {
-                return 0;
             }
         }
 

@@ -23,6 +23,13 @@ jobs:
         run: |
           sudo ln -s /usr/local/lib/gcc/11/libgomp.a /usr/local/lib/libgomp.a
       - name: Build binary
+        if: ${{ runner.os == 'macOS'}}
+        run: |
+          g++ --version
+          cd src
+          make CXX=g++-12
+      - name: Build binary
+        if: ${{ runner.os == 'Linux'}}
         run: |
           g++ --version
           cd src

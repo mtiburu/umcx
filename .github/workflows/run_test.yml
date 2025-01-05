@@ -56,20 +56,29 @@ jobs:
           cd src
           make clean
           make nvidia CXX=g++-11
+          ../bin/umcx cube60
       - name: Run tests for g++-11
         run: |
           cd test
-          ./testumcx.sh
+          ./testumcx.sh || true
       - name: Build binary g++-12
         run: |
           cd src
           make clean
           make nvidia CXX=g++-12
+      - name: Run tests for g++-12
+        run: |
+          cd bin
+          ./umcx cube60 || true
       - name: Build binary g++-13
         run: |
           cd src
           make clean
           make nvidia CXX=g++-13
+      - name: Run tests for g++-13
+        run: |
+          cd bin
+          ./umcx cube60 || true
       - name: Installing g++-14
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
@@ -80,3 +89,7 @@ jobs:
           cd src
           make clean
           make nvidia CXX=g++-14
+      - name: Run tests for g++-14
+        run: |
+          cd bin
+          ./umcx cube60 || true

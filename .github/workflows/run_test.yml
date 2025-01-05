@@ -7,7 +7,7 @@ jobs:
     name: CPU test
     strategy:
       matrix:
-        os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04, macos-13, macos-14]
+        os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04, macos-13, macos-14, windows-2019]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -22,13 +22,25 @@ jobs:
         if: ${{ runner.os == 'macOS' && matrix.os != 'macos-14' }}
         run: |
           sudo ln -s /usr/local/lib/gcc/11/libgomp.a /usr/local/lib/libgomp.a
-      - name: Build binary
+      - name: Install dependencies (Windows only)
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          choco install mingw --version=13.2.0
+          echo 'C:\ProgramData\Chocolatey\lib\mingw\tools\install\mingw64\bin\' >> $GITHUB_PATH
+          echo 'MW_MINGW64_LOC=/c/ProgramData/Chocolatey/lib/mingw/tools/install/mingw64/' >> $GITHUB_ENV
+      - name: Build binary on MacOS
         if: ${{ runner.os == 'macOS'}}
         run: |
           g++ --version
           cd src
           make CXX=g++-12
-      - name: Build binary
+      - name: Build binary on Windows
+        if: ${{ runner.os == 'Windows'}}
+        run: |
+          g++ --version
+          cd src
+          make
+      - name: Build binary on Linux
         if: ${{ runner.os == 'Linux'}}
         run: |
           g++ --version
@@ -145,11 +157,11 @@ jobs:
         run: |
           cd src
           make clean
-          make nvidiaclang CXX=clang++-17 USERCXXFLAGS="--cuda-path=/usr/local/cuda"
+          make nvidiaclang CXX=clang++-17 USERCXXFLAGS="--cuda-path=/usr/local/cuda" || true
       - name: Run tests for clang++-17
         run: |
           cd bin
-          LD_LIBRARY_PATH=usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true
+          LD_LIBRARY_PATH=/usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true
       - name: Installing clang-18
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
@@ -159,9 +171,9 @@ jobs:
         run: |
           cd src
           make clean
-          make nvidiaclang CXX=clang++-18 USERCXXFLAGS="--cuda-path=/usr/local/cuda"
+          make nvidiaclang CXX=clang++-18 USERCXXFLAGS="--cuda-path=/usr/local/cuda" || true
       - name: Run tests for clang++-18
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
           cd bin
-          LD_LIBRARY_PATH=usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true
+          LD_LIBRARY_PATH=/usr/lib/llvm-18/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true

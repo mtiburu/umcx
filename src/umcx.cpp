@@ -1,8 +1,15 @@
 //////////////////////////////////////////////////////////////////////////////////////////////////
 ///  \mainpage uMCX: readable, portable, hackable and massively-parallel photon simulator
 ///  \copyright Qianqian Fang <q.fang at neu.edu>, 2024-2025
-///  \section slicense License
-///          GPL v3, see LICENSE.txt for details
+///  \section sRationale Project Rationale
+///       \li Must be readable, write clean C++11 code as short as possible without obscurity
+///       \li Must be highly portable, support as many CPUs/GPUs and C++11 compilers as possible
+///       \li Must use human-understandable user input/output, centered around JSON/binary JSON
+///       \li Avoid using fancy C++ classes inside omp target region as OpenMP support is limited
+///  \section sFormat Code Formatting
+//        Please always run "make pretty" inside \c src before each commit, needing \c astyle
+///  \section sLicense Open-source License
+///       GPL v3 or later, see LICENSE.txt for details
 //////////////////////////////////////////////////////////////////////////////////////////////////
 #include <iostream>
 #include <fstream>
@@ -27,8 +34,7 @@
 
 using json = nlohmann::ordered_json;
 #pragma omp declare target
-/// basic data type: float4 class
-/** float4 data type has 4x float elements {x,y,z,w}, used for representing photon states */
+/// basic data type: float4 class, providing 4x float elements {x,y,z,w}, used for representing photon states
 struct float4 {
     float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
     float4() {}
@@ -38,36 +44,31 @@ struct float4 {
         return *this;
     }
 };
-/// basic data type: dim4 class
-/** dim4 is used to represent array dimensions, with 4x uint32_t members {x,y,z,w} */
+/// basic data type: dim4 class, representing array dimensions, with 4x uint32_t members {x,y,z,w}
 struct dim4 {
     uint32_t x = 0u, y = 0u, z = 0u, w = 0u;
     dim4() {}
     dim4(uint32_t x0, uint32_t y0, uint32_t z0, uint32_t w0 = 0) : x(x0), y(y0), z(z0), w(w0) {}
 };
 /// basic data type: short4 class
-/**  */
 struct short4 {
     int16_t x = 0, y = 0, z = 0, w = 0;
     short4() {}
     short4(int16_t x0, int16_t y0, int16_t z0, int16_t w0) : x(x0), y(y0), z(z0), w(w0) {}
 };
-/// Volumetric optical properties
-/** MCX_medium has 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)*/
+/// Volumetric optical properties, 4 float members, mua (absorption coeff., 1/mm), mus (scattering coeff., 1/mm), g (anisotropy) and n (ref. coeff.)
 struct MCX_medium {
     float mua = 0.f, mus = 0.f, g = 1.f, n = 1.f;
     MCX_medium() {}
     MCX_medium(float mua0, float mus0, float g0, float n0) : mua(mua0), mus(mus0), g(g0), n(n0) {}
 };
-#pragma omp end declare target
-/// Global simulation settings
-/** Stay constant throughout the simulation */
+/// Global simulation settings, all constants throughout the simulation
 struct MCX_param {
     float tstart, tend, rtstep, unitinmm;
     int maxgate, isreflect, mediumnum, outputtype;
 };
+#pragma omp end declare target
 /// MCX_volume class manages input and output volume
-/** */
 template<class T>
 struct MCX_volume { // shared, read-only
     dim4 size;
@@ -87,11 +88,7 @@ struct MCX_volume { // shared, read-only
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
         dimxyzt = dimxyz * Nt;
-
-        if (vol) {
-            delete [] vol;
-        }
-
+        delete [] vol;
         vol = new T[dimxyzt]();
 
         for (uint64_t i = 0; i < dimxyzt; i++) {
@@ -117,7 +114,6 @@ struct MCX_volume { // shared, read-only
 };
 #pragma omp declare target
 /// MCX_rand provides the xorshift128p random number generator
-/**  */
 struct MCX_rand { // per thread
     uint64_t t[2];
 
@@ -148,7 +144,6 @@ struct MCX_rand { // per thread
     }
 };
 /// MCX_photon class performs MC simulation of a single photon
-/** */
 struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,unused*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
@@ -331,8 +326,7 @@ struct MCX_photon { // per thread
     }
 };
 #pragma omp end declare target
-/// MCX_clock class provides timing information
-/** */
+/// MCX_clock class provides run-time information
 struct MCX_clock {
     std::chrono::system_clock::time_point starttime;
     MCX_clock() : starttime(std::chrono::system_clock::now()) {}
@@ -345,7 +339,6 @@ const json MCX_benchmarks = {"cube60", "cube60b", "cubesph60b", "sphshells", "sp
 enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel};
 const std::string MCX_outputtype = "xfe";
 /// MCX_userio parses user JSON input and saves output to binary JSON files
-/** */
 struct MCX_userio {
     json cfg;
     MCX_volume<int> domain;
@@ -441,8 +434,6 @@ struct MCX_userio {
                 domain.reshape(cfg["Shapes"]["_ArraySize_"][0], cfg["Shapes"]["_ArraySize_"][1], cfg["Shapes"]["_ArraySize_"][2]);
             }
         }
-
-        save<int>(domain, "vol.bnii");
     }
     void benchmark(std::string benchname) {
         MCX_benchmarkid bmid = (MCX_benchmarkid)std::distance(MCX_benchmarks.begin(), std::find(MCX_benchmarks.begin(), MCX_benchmarks.end(), benchname));
@@ -501,8 +492,8 @@ struct MCX_userio {
 /////////////////////////////////////////////////
 int main(int argn, char* argv[]) {
     if (argn == 1) {
-        std::cout << "Format: umcx -flag1 value1 -flag2 value2 ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t--bench\t\tbenchmark name" << std::endl;
-        std::cout << "\t-u/--unitinmm\tvoxel size in mm\n\t-E/--seed\tRNG seed\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
+        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t--bench\t\tbenchmark name" << std::endl;
+        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
         return 0;
     }
 
@@ -523,7 +514,7 @@ int main(int argn, char* argv[]) {
 
     double energyescape = 0.0;
     MCX_clock timer;
-    std::srand(io.cfg["Session"].contains("RNGSeed") && io.cfg["Session"]["RNGSeed"].get<int>() > 0 ? io.cfg["Session"]["RNGSeed"].get<int>() : std::time(0));
+    std::srand(!(io.cfg["Session"].contains("RNGSeed")) ? 1648335518 : (io.cfg["Session"]["RNGSeed"].get<int>() > 0 ? io.cfg["Session"]["RNGSeed"].get<int>() : std::time(0)));
     const uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
     const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
     const float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0].get<float>(), io.cfg["Optode"]["Source"]["Pos"][1].get<float>(), io.cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};

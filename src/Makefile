@@ -4,7 +4,7 @@ SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)
 
 nvc: CXX=nvc++
-nvc: CXXFLAGS+=-mp=gpu -Minfo=mp,accel -Minline -gpu=mem:managed
+nvc: CXXFLAGS+=-mp=gpu -Minfo=mp,accel -Minline -gpu=mem:managed -static-nvidia
 amd: CXXFLAGS+=-foffload=amdgcn-amdhsa="-march=gfx906" -foffload="-lm" -fcf-protection=none -fno-stack-protector
 nvidiaclang: CXX=clang++
 nvidiaclang: CXXFLAGS+=-fopenmp-targets=nvptx64 --cuda-gpu-arch=sm_50

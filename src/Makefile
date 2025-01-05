@@ -1,3 +1,8 @@
+ROOTDIR ?= ..
+MCXDIR  ?= $(ROOTDIR)
+OUTPUT_DIR=$(MCXDIR)/bin
+MKDIR = mkdir
+
 CXXFLAGS += -g -Wall -Wextra -pedantic -std=c++11 -O3
 BINARY = umcx
 SRC = umcx.cpp
@@ -16,12 +21,15 @@ omp: CXXFLAGS+=-fopenmp
 debugmulti multi: omp
 debugmulti multi: CXXFLAGS+=-foffload=disable
 debugsingle debugmulti: CXXFLAGS+=-DDEBUG
-debugsingle debugmulti multi single omp: $(BINARY)
+debugsingle debugmulti multi single omp: $(OUTPUT_DIR)/$(BINARY)
 
 all: multi
 
-$(BINARY): $(OBJS)
-	$(CXX)  $(CXXFLAGS) -o $(BINARY) $(OBJS)
+makedirs:
+	@if test ! -d $(OUTPUT_DIR); then $(MKDIR) $(OUTPUT_DIR); fi
+
+$(OUTPUT_DIR)/$(BINARY): makedirs $(OBJS)
+	$(CXX)  $(CXXFLAGS) -o $(OUTPUT_DIR)/$(BINARY) $(OBJS)
 
 %.o: %.c
 	$(CC)  $(CFLAGS) -c $< -o $@
@@ -30,7 +38,7 @@ $(BINARY): $(OBJS)
 	$(CXX)  $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BINARY) *.o
+	rm -rf $(OUTPUT_DIR)/$(BINARY) *.o
 
 # derived the astyle settings from https://github.com/nlohmann/json
 pretty:

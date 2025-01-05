@@ -56,6 +56,10 @@ jobs:
           cd src
           make clean
           make nvidia CXX=g++-11
+      - name: Run tests for g++-11
+        run: |
+          cd test
+          ./testumcx.sh
       - name: Build binary g++-12
         run: |
           cd src

@@ -29,13 +29,13 @@ makedirs:
 	@if test ! -d $(OUTPUT_DIR); then $(MKDIR) $(OUTPUT_DIR); fi
 
 $(OUTPUT_DIR)/$(BINARY): makedirs $(OBJS)
-	$(CXX)  $(CXXFLAGS) -o $(OUTPUT_DIR)/$(BINARY) $(OBJS)
+	$(CXX)  $(CXXFLAGS) -o $(OUTPUT_DIR)/$(BINARY) $(OBJS) $(USERLINKFLAGS)
 
 %.o: %.c
 	$(CC)  $(CFLAGS) -c $< -o $@
 
 %.o: %.cpp
-	$(CXX)  $(CXXFLAGS) -c $< -o $@
+	$(CXX)  $(CXXFLAGS) $(USERCXXFLAGS) -c $< -o $@
 
 clean:
 	rm -rf $(OUTPUT_DIR)/$(BINARY) *.o

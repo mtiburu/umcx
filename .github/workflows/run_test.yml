@@ -51,6 +51,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+          sudo add-apt-repository ppa:savoury1/llvm-defaults-17 -y
           sudo apt-get install gcc-11 g++-11 gcc-12 g++-12 gcc-13 g++-13 gcc-11-offload-nvptx gcc-12-offload-nvptx gcc-13-offload-nvptx clang-17 libomp-17-dev clang-tools-17 -y
       - name: Fix g++-13 missing libgomp file
         if: ${{ matrix.os != 'ubuntu-24.04' }}

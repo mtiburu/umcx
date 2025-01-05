@@ -23,6 +23,11 @@ jobs:
           g++ --version
           cd src
           make
+      - name: Run benchmarks
+        run: |
+          cd bin
+          ./umcx cube60 || true
+          ./umcx cube60b || true
       - name: Run tests
         run: |
           cd test
@@ -70,6 +75,7 @@ jobs:
         run: |
           cd bin
           ./umcx cube60 || true
+          ./umcx cube60b || true
       - name: Build binary g++-13
         run: |
           cd src

@@ -67,7 +67,7 @@ struct MCX_medium {
 /// Global simulation settings
 /** Stay constant throughout the simulation */
 struct MCX_param {
-    float tstart, tend, rtstep;
+    float tstart, tend, rtstep, unitinmm;
     int maxgate, isreflect, mediumnum;
 };
 /// MCX_volume class manages input and output volume
@@ -507,8 +507,8 @@ int main(int argn, char* argv[]) {
 
     MCX_userio io(argv, argn);
     const MCX_param gcfg = {
-        /*.tstart*/ io.cfg["Forward"]["T0"].get<float>(), /*.tend*/ io.cfg["Forward"]["T1"].get<float>(), /*.rtstep*/ 1.f / io.cfg["Forward"]["Dt"].get<float>(),
-        /*.maxgate*/ (int)((io.cfg["Forward"]["T1"].get<float>() - io.cfg["Forward"]["T0"].get<float>()) / io.cfg["Forward"]["Dt"].get<float>() + 0.5f),
+        /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
+        /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f),
         /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
         /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size()
     };
@@ -517,11 +517,12 @@ int main(int argn, char* argv[]) {
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
-        prop[i] = MCX_medium(io.cfg["Domain"]["Media"][i]["mua"].get<float>(), io.cfg["Domain"]["Media"][i]["mus"].get<float>(), io.cfg["Domain"]["Media"][i]["g"].get<float>(), io.cfg["Domain"]["Media"][i]["n"].get<float>());
+        prop[i] = MCX_medium(JNUM(io.cfg["Domain"]["Media"], i, "mua") * gcfg.unitinmm, JNUM(io.cfg["Domain"]["Media"], i, "mus") * gcfg.unitinmm, io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
     }
 
     double energyescape = 0.0;
     MCX_clock timer;
+    std::srand(io.cfg["Session"].contains("RNGSeed") && io.cfg["Session"]["RNGSeed"].get<int>() > 0 ? io.cfg["Session"]["RNGSeed"].get<int>() : std::time(0));
     const uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
     const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
     const float4 pos = {io.cfg["Optode"]["Source"]["Pos"][0].get<float>(), io.cfg["Optode"]["Source"]["Pos"][1].get<float>(), io.cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};

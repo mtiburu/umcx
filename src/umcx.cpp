@@ -446,7 +446,7 @@ struct MCX_userio {
     }
     void benchmark(std::string benchname) {
         MCX_benchmarkid bmid = (MCX_benchmarkid)std::distance(MCX_benchmarks.begin(), std::find(MCX_benchmarks.begin(), MCX_benchmarks.end(), benchname));
-        cfg = { {"Session", {{"ID", "cube60"}, {"Photons", 1000000}, {"RNGSeed", 1648335518}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+        cfg = {{"Session", {{"ID", "cube60"}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
             {"Domain", {{"Media", {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.002}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.0}}}}, {"Dim", {60, 60, 60}}}},
             {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}}
         };
@@ -516,7 +516,7 @@ int main(int argn, char* argv[]) {
         /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
         /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f),
         /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0), /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1),
-        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "f")[0])
+        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "x")[0])
     };
     MCX_volume<int> inputvol = io.domain;
     MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);

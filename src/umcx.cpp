@@ -33,6 +33,9 @@
 #define JHAS(o, key1, type, default)   (o.contains(key1) ? (o[key1].get<type>()) : (default))
 
 using json = nlohmann::ordered_json;
+
+const std::string MCX_outputtype = "xfe";
+enum MCX_outputtypeid {otFluenceRate, otFluence, otEnergy};
 #pragma omp declare target
 /// basic data type: float4 class, providing 4x float elements {x,y,z,w}, used for representing photon states
 struct float4 {
@@ -65,7 +68,7 @@ struct MCX_medium {
 /// Global simulation settings, all constants throughout the simulation
 struct MCX_param {
     float tstart, tend, rtstep, unitinmm;
-    int maxgate, isreflect, mediumnum, outputtype;
+    int maxgate, isreflect, isnormalized, mediumnum, outputtype;
 };
 #pragma omp end declare target
 /// MCX_volume class manages input and output volume
@@ -80,10 +83,10 @@ struct MCX_volume { // shared, read-only
         reshape(v.size.x, v.size.y, v.size.z, v.size.w);
         std::memcpy(vol, v.vol, sizeof(T)*dimxyzt);
     }
-    MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
+    MCX_volume(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0f) {
         reshape(Nx, Ny, Nz, Nt, value);
     }
-    void reshape(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0) {
+    void reshape(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0f) {
         size = dim4(Nx, Ny, Nz, Nt);
         dimxy = Nx * Ny;
         dimxyz = dimxy * Ny;
@@ -101,15 +104,20 @@ struct MCX_volume { // shared, read-only
     int64_t index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
         return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (int)(it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
     }
-    T& get(int64_t idx) const  { // must be inside the volume
+    T& get(const int64_t idx) { // must be inside the volume
         return vol[idx];
     }
-    void add(T val, int64_t idx) const  {
+    void add(const T val, const int64_t idx) {
         #pragma omp atomic
         vol[idx] += val;
     }
-    void mask(T val, int64_t idx) const  {
-        vol[idx] = (val > 0.) ? val : vol[idx];
+    void mask(const T val, const int64_t idx) {
+        vol[idx] = (val > 0.f) ? val : vol[idx];
+    }
+    void scale(const float scale)  {
+        for (uint64_t i = 0; i < dimxyzt; i++) {
+            vol[i] *= scale;
+        }
     }
 };
 #pragma omp declare target
@@ -230,7 +238,7 @@ struct MCX_photon { // per thread
         return lastvoxelidx;
     }
     void save(MCX_volume<float>& outvol, int tshift, float mua, const MCX_param& gcfg) {
-        outvol.add(gcfg.outputtype == 2 ? (len.w - pos.w) : (mua < FLT_EPSILON ? (len.w * len.z) : (len.w - pos.w) / mua), lastvoxelidx + tshift * outvol.dimxyz);
+        outvol.add(gcfg.outputtype == otEnergy ? (len.w - pos.w) : (mua < FLT_EPSILON ? (len.w * len.z) : (len.w - pos.w) / mua), lastvoxelidx + tshift * outvol.dimxyz);
         len.w = pos.w;
         len.z = 0.f;
     }
@@ -331,14 +339,13 @@ struct MCX_clock {
 };
 const json MCX_benchmarks = {"cube60", "cube60b", "cubesph60b", "sphshells", "spherebox", "skinvessel"};
 enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel};
-const std::string MCX_outputtype = "xfe";
 /// MCX_userio parses user JSON input and saves output to binary JSON files
 struct MCX_userio {
     json cfg;
     MCX_volume<int> domain;
-    const std::map<std::set<std::string>, std::string> cmdflags = {{{"-n", "--photon"}, "/Session/Photons"}, {{"-b", "--reflect"}, "/Session/DoMismatch"},
-        {{"-u", "--unitinmm"}, "/Domain/LengthUnit"}, {{"-U", "--normalize"}, "/Session/DoNormalize"}, {{"-E", "--seed"}, "/Session/RNGSeed"}, {{"-O", "--outputtype"}, "/Session/OutputType"},
-        {{"-d", "--savedet"}, "/Session/DoPartialPath"}, {{"-t", "--thread"}, "/Session/ThreadNum"}, {{"-T", "--blocksize"}, "/Session/BlockSize"}, {{"-G", "--gpuid"}, "/Session/DeviceID"}
+    const std::map<std::set<std::string>, std::pair<std::string, char>> cmdflags = {{{"-n", "--photon"}, {"/Session/Photons", 'f'}}, {{"-b", "--reflect"}, {"/Session/DoMismatch", 'i'}}, {{"-s", "--session"}, {"/Session/ID", 's'}},
+        {{"-u", "--unitinmm"}, {"/Domain/LengthUnit", 'f'}}, {{"-U", "--normalize"}, {"/Session/DoNormalize", 'i'}}, {{"-E", "--seed"}, {"/Session/RNGSeed", 'i'}}, {{"-O", "--outputtype"}, {"/Session/OutputType", 's'}},
+        {{"-d", "--savedet"}, {"/Session/DoPartialPath", 'i'}}, {{"-t", "--thread"}, {"/Session/ThreadNum", 'i'}}, {{"-T", "--blocksize"}, {"/Session/BlockSize", 'i'}}, {{"-G", "--gpuid"}, {"/Session/DeviceID", 'i'}}
     };
     const std::map<std::string, std::function<int(float4 p, json obj)>> shapeparser = {
         {"Sphere", [](float4 p, json obj) -> int { return ((p.x - JNUM(obj, "O", 0)) * (p.x - JNUM(obj, "O", 0)) + (p.y - JNUM(obj, "O", 1)) * (p.y - JNUM(obj, "O", 1)) + (p.z - JNUM(obj, "O", 2)) * (p.z - JNUM(obj, "O", 2)) < (JVAL(obj, "R", float) * JVAL(obj, "R", float))) ? JVAL(obj, "Tag", int) : std::numeric_limits<int>::quiet_NaN(); }},
@@ -356,13 +363,13 @@ struct MCX_userio {
             }
         }
     };
-    MCX_userio(char* argv[], int argn = 1) {   // parsing command line
-        std::string finput = argv[1];
+    MCX_userio(char* argv[], int argc = 1) {   // parsing command line
+        std::vector<std::string> params(argv + 1, argv + argc);
 
-        if (finput[0] == '-') {  // format 1: umcx -flag1 jsonvalue1 -flag2 jsonvalue2 --longflag3 jsonvalue3 ....
+        if (params[0].find("-") == 0) {  // format 1: umcx -flag1 jsonvalue1 -flag2 jsonvalue2 --longflag3 jsonvalue3 ....
             int i = 1;
 
-            while (i < argn) {
+            while (i < argc) {
                 std::string arg(argv[i++]);
 
                 if (arg == "-f" || arg == "--input") {
@@ -374,19 +381,27 @@ struct MCX_userio {
                 } else if (arg[0] == '-') {
                     for ( const auto& opts : cmdflags ) {
                         if (opts.first.find(arg) != opts.first.end()) {
-                            cfg[json::json_pointer(opts.second)] = json::parse(argv[i++]);
+                            cfg[json::json_pointer(opts.second.first)] = opts.second.second == 's' ?  json::parse("\"" + std::string(argv[i++]) + "\"") :  json::parse(argv[i++]);
                             break;
                         }
                     }
                 }
             }
-        } else if (finput.find(".") == std::string::npos) { // format 2: umcx benchmarkname
-            benchmark(finput);
+        } else if (params[0].find(".") == std::string::npos) { // format 2: umcx benchmarkname
+            benchmark(params[0]);
         } else {                                            // format 3: umcx input.json
-            loadfromfile(finput);
+            loadfromfile(params[0]);
         }
 
         initdomain();
+
+        if (std::find(params.begin(), params.end(), "--dumpjson") != params.end()) {
+            std::cout << cfg.dump(4) << std::endl;
+            std::exit(0);
+        } else if (std::find(params.begin(), params.end(), "--dumpmask") != params.end()) {
+            save(domain, 1.f, (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_vol.bnii" : "vol.bnii"));
+            std::exit(0);
+        }
     }
     void initdomain() {
         domain.reshape(cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]);
@@ -464,21 +479,26 @@ struct MCX_userio {
         inputjson >> cfg;
     }
     template<class T>
-    void save(MCX_volume<T>& outputvol, std::string outputfile = "output.bnii") {
+    void save(MCX_volume<T>& outputvol, float normalizer = 1.f, std::string outputfile = "") {
+        if (normalizer != 1.f) {
+            outputvol.scale(normalizer);
+        }
+
         json bniifile = {
             { "NIFTIHeader", {{"Dim", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}}}},
             {
                 "NIFTIData", {{"_ArraySize_", {outputvol.size.x, outputvol.size.y, outputvol.size.z, outputvol.size.w}},
-                    {"_ArrayType_", "single"}, {"_ArrayOrder_", "c"},
+                    {"_ArrayType_", ((std::string(typeid(T).name()) == "f") ? "single" : "int32")}, {"_ArrayOrder_", "c"},
                     {"_ArrayData_", std::vector<T>(outputvol.vol, outputvol.vol + outputvol.dimxyzt)}
                 }
             }
         };
-        bniifile["NIFTIData"]["_ArrayType_"] = ((std::string(typeid(T).name()) == "f") ? "single" : "int32");
+        outputfile = (outputfile.empty() && cfg["Session"].contains("ID")) ? cfg["Session"]["ID"].get<std::string>() + ".bnii" : "output.bnii";
         std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
         std::vector<uint8_t> output_vector;
-        json::to_bjdata(bniifile, outputdata, true, true);
+        json::to_bjdata(bniifile, output_vector, true, true);
         outputdata.write((const char*)output_vector.data(), output_vector.size());
+        outputdata.close();
     }
 };
 /////////////////////////////////////////////////
@@ -486,7 +506,7 @@ struct MCX_userio {
 /////////////////////////////////////////////////
 int main(int argn, char* argv[]) {
     if (argn == 1) {
-        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t--bench\t\tbenchmark name" << std::endl;
+        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
         std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
         return 0;
     }
@@ -495,7 +515,7 @@ int main(int argn, char* argv[]) {
     const MCX_param gcfg = {
         /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
         /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f),
-        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
+        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0), /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1),
         /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "f")[0])
     };
     MCX_volume<int> inputvol = io.domain;
@@ -542,8 +562,9 @@ int main(int argn, char* argv[]) {
         energyescape += p.pos.w;
     }
 
-    printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), (nphoton - energyescape) / nphoton * 100.);
-    io.save<float>(outputvol);
+    float normalizer = (gcfg.outputtype == otEnergy) ? (1.f / nphoton) : ((gcfg.outputtype == otFluenceRate) ? gcfg.rtstep / (nphoton * gcfg.unitinmm * gcfg.unitinmm) : 1.f / (nphoton * gcfg.unitinmm * gcfg.unitinmm));
+    printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, normalizer %.6f, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), normalizer, (nphoton - energyescape) / nphoton * 100.);
+    io.save<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
     delete [] prop;
     return 0;
 }

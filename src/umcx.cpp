@@ -31,6 +31,8 @@
 #define JNUM(o, key1, key2)  (o[key1][key2].get<float>())
 #define JVAL(o, key1, type)  (o[key1].get<type>())
 #define JHAS(o, key1, type, default)   (o.contains(key1) ? (o[key1].get<type>()) : (default))
+#define DET_MASK             0x80000000u              /**< mask of the sign bit to get the detector */
+#define MED_MASK             0x7FFFFFFFu              /**< mask of the remaining bits to get the medium index */
 
 using json = nlohmann::ordered_json;
 
@@ -68,7 +70,7 @@ struct MCX_medium {
 /// Global simulation settings, all constants throughout the simulation
 struct MCX_param {
     float tstart, tend, rtstep, unitinmm;
-    int maxgate, isreflect, isnormalized, mediumnum, outputtype;
+    int maxgate, isreflect, isnormalized, issavevol, mediumnum, outputtype, detnum;
 };
 #pragma omp end declare target
 /// MCX_volume class manages input and output volume
@@ -101,18 +103,18 @@ struct MCX_volume { // shared, read-only
     ~MCX_volume () {
         delete [] vol;
     }
-    int64_t index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
+    int index(short ix, short iy, short iz, int it = 0) { // when outside the volume, return -1, otherwise, return 1d index
         return !(ix < 0 || iy < 0 || iz < 0 || ix >= (short)size.x || iy >= (short)size.y || iz >= (short)size.z || it >= (int)size.w) ? (int)(it * dimxyz + iz * dimxy + iy * size.x + ix) : -1;
     }
-    T& get(const int64_t idx) { // must be inside the volume
+    T& get(const int idx) { // must be inside the volume
         return vol[idx];
     }
-    void add(const T val, const int64_t idx) {
+    void add(const T val, const int idx) {
         #pragma omp atomic
         vol[idx] += val;
     }
-    void mask(const T val, const int64_t idx) {
-        vol[idx] = (val > 0.f) ? val : vol[idx];
+    void mask(const T val, const int idx) {
+        vol[idx] = (val) ? val : vol[idx];
     }
     void scale(const float scale)  {
         for (uint64_t i = 0; i < dimxyzt; i++) {
@@ -155,8 +157,7 @@ struct MCX_rand { // per thread
 struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,unused*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
-    int64_t lastvoxelidx;
-    int mediaid;
+    int lastvoxelidx, mediaid;
 
     MCX_photon(const float4& p0, const float4& v0) { // constructor
         launch(p0, v0);
@@ -177,28 +178,30 @@ struct MCX_photon { // per thread
         len.x = ran.next_scat_len();
 
         while (sprint<isreflect>(invol, outvol, props, ran, gcfg) == 0) {
-            scatter(props[mediaid], ran);
+            scatter(props[(mediaid & MED_MASK)], ran);
         }
     }
     template<const bool isreflect>              // run from one scattering site to the next, return 1 when terminate
     int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) {
         while (len.x > 0.f) {
-            int64_t newvoxelid = step(invol, props[mediaid]);
+            int newvoxelid = step(invol, props[(mediaid & MED_MASK)]);
 
             if (newvoxelid != lastvoxelidx) {   // only save when moving out of a voxel
-                save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))), props[mediaid].mua, gcfg);
+                if (gcfg.issavevol) {
+                    save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))), props[(mediaid & MED_MASK)].mua, gcfg);
+                }
 
                 if (len.y > gcfg.tend) {
-                    return 1;                   // terminating photon due to exceeding maximum time gate
+                    return 1;    // terminating photon due to exceeding maximum time gate
                 }
 
                 int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
 
-                if (isreflect && gcfg.isreflect && props[mediaid].n != props[newmediaid].n) {
-                    if (reflect(props[mediaid].n, props[newmediaid].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || newmediaid == 0)) {
-                        return 1;               // terminating photon due to transmitting to background at boundary
+                if (isreflect && gcfg.isreflect && props[(mediaid & MED_MASK)].n != props[(newmediaid & MED_MASK)].n) {
+                    if (reflect(props[((mediaid & MED_MASK))].n, props[(newmediaid & MED_MASK)].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || (newmediaid & MED_MASK) == 0)) {
+                        return 1;    // terminating photon due to transmitting to background at boundary
                     }
-                } else if (newvoxelid < 0 || newmediaid == 0) {
+                } else if (newvoxelid < 0 || (newmediaid & MED_MASK) == 0) {
                     return 1;                   // terminating photon due to continue moving to 0-valued voxel or out of domain
                 }
 
@@ -209,7 +212,7 @@ struct MCX_photon { // per thread
 
         return 0;
     }
-    int64_t step(MCX_volume<int>& invol, MCX_medium& prop) {
+    int step(MCX_volume<int>& invol, MCX_medium& prop) {
         float dist, htime[3];
 
         htime[0] = fabsf((ipos.x + (vec.x > 0.f) - pos.x) * rvec.x);  //< time-of-flight to hit the wall in each direction
@@ -294,7 +297,7 @@ struct MCX_photon { // per thread
         tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
         vec *= tmp0;
     }
-    int reflect(float n1, float n2, MCX_rand& ran, int64_t& newvoxelid, int& newmediaid) {
+    int reflect(float n1, float n2, MCX_rand& ran, int& newvoxelid, int& newmediaid) {
         float Rtotal = reflectcoeff(n1, n2);
 
         if (Rtotal < 1.f && ran.rand01() > Rtotal) {
@@ -345,7 +348,7 @@ struct MCX_userio {
     MCX_volume<int> domain;
     const std::map<std::set<std::string>, std::pair<std::string, char>> cmdflags = {{{"-n", "--photon"}, {"/Session/Photons", 'f'}}, {{"-b", "--reflect"}, {"/Session/DoMismatch", 'i'}}, {{"-s", "--session"}, {"/Session/ID", 's'}},
         {{"-u", "--unitinmm"}, {"/Domain/LengthUnit", 'f'}}, {{"-U", "--normalize"}, {"/Session/DoNormalize", 'i'}}, {{"-E", "--seed"}, {"/Session/RNGSeed", 'i'}}, {{"-O", "--outputtype"}, {"/Session/OutputType", 's'}},
-        {{"-d", "--savedet"}, {"/Session/DoPartialPath", 'i'}}, {{"-t", "--thread"}, {"/Session/ThreadNum", 'i'}}, {{"-T", "--blocksize"}, {"/Session/BlockSize", 'i'}}, {{"-G", "--gpuid"}, {"/Session/DeviceID", 'i'}}
+        {{"-d", "--savedet"}, {"/Session/DoPartialPath", 'i'}}, {{"-t", "--thread"}, {"/Session/ThreadNum", 'i'}}, {{"-T", "--blocksize"}, {"/Session/BlockSize", 'i'}}, {{"-G", "--gpuid"}, {"/Session/DeviceID", 'i'}}, {{"-S", "--save2pt"}, {"/Session/DoSaveVolume", 'i'}}
     };
     const std::map<std::string, std::function<int(float4 p, json obj)>> shapeparser = {
         {"Sphere", [](float4 p, json obj) -> int { return ((p.x - JNUM(obj, "O", 0)) * (p.x - JNUM(obj, "O", 0)) + (p.y - JNUM(obj, "O", 1)) * (p.y - JNUM(obj, "O", 1)) + (p.z - JNUM(obj, "O", 2)) * (p.z - JNUM(obj, "O", 2)) < (JVAL(obj, "R", float) * JVAL(obj, "R", float))) ? JVAL(obj, "Tag", int) : std::numeric_limits<int>::quiet_NaN(); }},
@@ -412,20 +415,16 @@ struct MCX_userio {
 
                 if (shapes.contains("Grid")) {
                     domain.reshape(shapes["Grid"]["Size"][0], shapes["Grid"]["Size"][1], shapes["Grid"]["Size"][2], 1, shapes["Grid"]["Tag"]);
-
-                    if ((cfg["Shapes"].is_array() && cfg["Shapes"].size() == 1) || cfg["Shapes"].is_object()) {
-                        return;
-                    }
                 }
 
-                for (const auto& obj : cfg["Shapes"]) {
-                    #pragma omp parallel for collapse(2)
+                for (const auto& obj : cfg["Shapes"])
+                    if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
+                        #pragma omp parallel for collapse(2)
 
-                    for (uint32_t x = 0; x < domain.size.x; x++)
-                        for (uint32_t y = 0; y < domain.size.y; y++)
-                            for (uint32_t z = 0; z < domain.size.z; z++) {
-                                if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
-                                    int64_t idx = domain.index(x, y, z);
+                        for (uint32_t z = 0; z < domain.size.z; z++)
+                            for (uint32_t y = 0; y < domain.size.y; y++)
+                                for (uint32_t x = 0; x < domain.size.x; x++) {
+                                    int idx = domain.index(x, y, z);
 
                                     if (obj.begin().key().find("Layers") == 1) {
                                         for (auto layer : obj.front().items()) {
@@ -437,10 +436,48 @@ struct MCX_userio {
                                         domain.mask((!std::isnan(label) ? label : 0), idx);
                                     }
                                 }
-                            }
-                }
+                    }
             } else {
                 domain.reshape(cfg["Shapes"]["_ArraySize_"][0], cfg["Shapes"]["_ArraySize_"][1], cfg["Shapes"]["_ArraySize_"][2]);
+            }
+        }
+
+        if (cfg["Optode"].contains("Detector")) {
+            maskdetectors(cfg["Optode"]["Detector"]);
+        }
+    }
+    void maskdetectors(json detectors) {
+        const int8_t neighbors[26][3] = {{-1, -1, -1}, {0, -1, -1}, {1, -1, -1}, {-1, 0, -1}, {0, 0, -1}, {1, 0, -1}, {-1, 1, -1}, {0, 1, -1}, {1, 1, -1}, {-1, -1, 0}, {0, -1, 0}, {1, -1, 0}, {-1, 0, 0}, {1, 0, 0}, {-1, 1, 0}, {0, 1, 0}, {1, 1, 0}, {-1, -1, 1}, {0, -1, 1}, {1, -1, 1}, {-1, 0, 1}, {0, 0, 1}, {1, 0, 1}, {-1, 1, 1}, {0, 1, 1}, {1, 1, 1}};
+
+        for (const auto& det : detectors) {
+            float radius = det["R"].get<float>();
+
+            for (float z = -radius - 1.f; z <= radius + 1.f; z += 0.5f) { /*search in a cube with edge length 2*R+3*/
+                float iz = z + det["Pos"][2].get<float>();
+
+                for (float y = -radius - 1.f; y <= radius + 1.f; y += 0.5f) {
+                    float iy = y + det["Pos"][1].get<float>();
+
+                    for (float x = -radius - 1.f; x <= radius + 1.f; x += 0.5f) {
+                        float ix = x + det["Pos"][0].get<float>();
+                        int idx1d = domain.index((short)ix, (short)iy, (short)iz);
+
+                        if (idx1d < 0 ||  x * x + y * y + z * z > (radius + 1.f) * (radius + 1.f) || (domain.get(idx1d) & MED_MASK) == 0) {
+                            continue;
+                        }
+
+                        if ((short)ix * (short)iy * (short)iz == 0 || (short)ix == (short)domain.size.x || (short)iy == (short)domain.size.y || (short)iz == (short)domain.size.z) { // if on bbx, mark as det
+                            domain.mask(domain.get(idx1d) | DET_MASK, idx1d);
+                        } else { // inner voxels, must have 1 neighbor is 0
+                            for (int i = 0; i < 26; i++) {
+                                if ((domain.get(idx1d + domain.index(neighbors[i][0], neighbors[i][1], neighbors[i][2])) & MED_MASK) == 0) {
+                                    domain.mask((domain.get(idx1d) | DET_MASK), idx1d);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -448,7 +485,7 @@ struct MCX_userio {
         MCX_benchmarkid bmid = (MCX_benchmarkid)std::distance(MCX_benchmarks.begin(), std::find(MCX_benchmarks.begin(), MCX_benchmarks.end(), benchname));
         cfg = {{"Session", {{"ID", "cube60"}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
             {"Domain", {{"Media", {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.002}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.0}}}}, {"Dim", {60, 60, 60}}}},
-            {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}}}
+            {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}, {"Detector", {{{"Pos", {29, 19, 0}}, {"R", 1}}, {{"Pos", {29, 39, 0}}, {"R", 1}}, {{"Pos", {19, 29, 0}}, {"R", 1}}, {{"Pos", {39, 29, 0}}, {"R", 1}}}}}}
         };
         cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}])"_json;
         cfg["Session"]["DoMismatch"] = !((int)(bmid == bm_cube60 || bmid == bm_skinvessel || bmid == bm_spherebox));
@@ -493,11 +530,9 @@ struct MCX_userio {
                 }
             }
         };
-        outputfile = (outputfile.empty() && cfg["Session"].contains("ID")) ? cfg["Session"]["ID"].get<std::string>() + ".bnii" : "output.bnii";
+        outputfile = (outputfile.length() ? outputfile : (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + ".bnii" : "output.bnii"));
         std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
-        std::vector<uint8_t> output_vector;
-        json::to_bjdata(bniifile, output_vector, true, true);
-        outputdata.write((const char*)output_vector.data(), output_vector.size());
+        json::to_bjdata(bniifile, outputdata, true, true);
         outputdata.close();
     }
 };
@@ -514,9 +549,10 @@ int main(int argn, char* argv[]) {
     MCX_userio io(argv, argn);
     const MCX_param gcfg = {
         /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
-        /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f),
-        /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0), /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1),
-        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "x")[0])
+        /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f), /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
+        /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1), /*.issavevol*/ (io.cfg["Session"].contains("DoSaveVolume") ? io.cfg["Session"]["DoSaveVolume"].get<int>() : 1),
+        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "x")[0]),
+        /*.detnum*/ (io.cfg["Optode"].contains("Detector") ? (int)io.cfg["Optode"]["Detector"].size() : 0)
     };
     MCX_volume<int> inputvol = io.domain;
     MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);
@@ -524,6 +560,12 @@ int main(int argn, char* argv[]) {
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
         prop[i] = MCX_medium(JNUM(io.cfg["Domain"]["Media"], i, "mua") * gcfg.unitinmm, JNUM(io.cfg["Domain"]["Media"], i, "mus") * gcfg.unitinmm, io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
+    }
+
+    float4* detpos = new float4[gcfg.detnum];
+
+    for (int i = 0; i < gcfg.detnum; i++) {
+        detpos[i] = float4(JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 0), JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 1), JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 2), JNUM(io.cfg["Optode"]["Detector"], i, "R"));
     }
 
     double energyescape = 0.0;
@@ -543,7 +585,7 @@ int main(int argn, char* argv[]) {
     const int blocksize = JHAS(io.cfg["Session"], "BlockSize", int, 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) device(deviceid) \
-    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) reduction(+ : energyescape) firstprivate(ran, p) \
+    map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) map(to: detpos[0:gcfg.detnum]) reduction(+ : energyescape) firstprivate(ran, p) \
     map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt])
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
@@ -564,7 +606,10 @@ int main(int argn, char* argv[]) {
 
     float normalizer = (gcfg.outputtype == otEnergy) ? (1.f / nphoton) : ((gcfg.outputtype == otFluenceRate) ? gcfg.rtstep / (nphoton * gcfg.unitinmm * gcfg.unitinmm) : 1.f / (nphoton * gcfg.unitinmm * gcfg.unitinmm));
     printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, normalizer %.6f, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), normalizer, (nphoton - energyescape) / nphoton * 100.);
-    io.save<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
+    if(gcfg.issavevol) {
+        io.save<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
+    }
     delete [] prop;
+    delete [] detpos;
     return 0;
 }

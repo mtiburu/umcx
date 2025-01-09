@@ -577,6 +577,7 @@ int main(int argn, char* argv[]) {
     const float4 dir = {io.cfg["Optode"]["Source"]["Dir"][0].get<float>(), io.cfg["Optode"]["Source"]["Dir"][1].get<float>(), io.cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
+    printf("before omp target\n");
 #ifdef GPU_OFFLOAD
     const int deviceid = JHAS(io.cfg["Session"], "DeviceID", int, 1) - 1, gridsize = JHAS(io.cfg["Session"], "ThreadNum", int, 10000) / JHAS(io.cfg["Session"], "BlockSize", int, 64);
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
@@ -604,11 +605,14 @@ int main(int argn, char* argv[]) {
         energyescape += p.pos.w;
     }
 
+    printf("after omp target\n");
     float normalizer = (gcfg.outputtype == otEnergy) ? (1.f / nphoton) : ((gcfg.outputtype == otFluenceRate) ? gcfg.rtstep / (nphoton * gcfg.unitinmm * gcfg.unitinmm) : 1.f / (nphoton * gcfg.unitinmm * gcfg.unitinmm));
     printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, normalizer %.6f, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), normalizer, (nphoton - energyescape) / nphoton * 100.);
-    if(gcfg.issavevol) {
+
+    if (gcfg.issavevol) {
         io.save<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
     }
+
     delete [] prop;
     delete [] detpos;
     return 0;

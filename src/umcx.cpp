@@ -70,7 +70,7 @@ struct MCX_medium {
 /// Global simulation settings, all constants throughout the simulation
 struct MCX_param {
     float tstart, tend, rtstep, unitinmm;
-    int maxgate, isreflect, isnormalized, issavevol, mediumnum, outputtype, detnum;
+    int maxgate, isreflect, isnormalized, issavevol, issavedet, savedetflag, mediumnum, outputtype, detnum, maxdetphotons;
 };
 #pragma omp end declare target
 /// MCX_volume class manages input and output volume
@@ -94,7 +94,7 @@ struct MCX_volume { // shared, read-only
         dimxyz = dimxy * Ny;
         dimxyzt = dimxyz * Nt;
         delete [] vol;
-        vol = new T[dimxyzt]();
+        vol = new T[dimxyzt] {};
 
         for (uint64_t i = 0; i < dimxyzt; i++) {
             vol[i] = value;
@@ -122,7 +122,46 @@ struct MCX_volume { // shared, read-only
         }
     }
 };
+/// MCX_detect class manages detected photon buffer
+enum MCX_detflags {dpDetID = 1, dpPPath = 4, dpExitPos = 16, dpExitDir = 32};
 #pragma omp declare target
+struct MCX_detect { // shared, read-only
+    uint32_t detectedphoton = 0, maxdetphotons = 0;
+    short detphotondatalen = 0, ppathlen = 0;
+    float* detphotondata = nullptr;
+
+    MCX_detect() {}
+    MCX_detect(const MCX_param& gcfg) {
+        maxdetphotons = gcfg.issavedet ? gcfg.maxdetphotons : 0;
+        detphotondatalen = (gcfg.savedetflag & dpDetID) + ((gcfg.savedetflag & dpPPath) > 0) * gcfg.mediumnum + (((gcfg.savedetflag & dpExitPos) > 0) + ((gcfg.savedetflag & dpExitDir) > 0)) * 3;
+        ppathlen = (gcfg.issavedet && (gcfg.savedetflag & dpPPath)) ? gcfg.mediumnum : 0;
+        detphotondata = new float[maxdetphotons * detphotondatalen] {};
+    }
+    ~MCX_detect () {
+        delete [] detphotondata;
+    }
+    void addphoton(float detid, float4& pos, float4& vec, float ppath[], const MCX_param& gcfg)  {
+        uint32_t baseaddr = 0;
+        #pragma omp atomic capture
+        baseaddr = detectedphoton++;
+
+        if (baseaddr < maxdetphotons) {
+            baseaddr *= detphotondatalen;
+            copydata(baseaddr, &detid, (gcfg.savedetflag & dpDetID) > 0);
+            copydata(baseaddr, ppath, ((gcfg.savedetflag & dpPPath) > 0) * ppathlen);
+            copydata(baseaddr, &pos.x, ((gcfg.savedetflag & dpExitPos) > 0) * 3);
+            copydata(baseaddr, &vec.x, ((gcfg.savedetflag & dpExitDir) > 0) * 3);
+        }
+    }
+    void copydata(uint32_t& startpos, float* buf, const int& len) {
+        for (int i = 0; i < len; i++) {
+            detphotondata[startpos++] = buf[i];
+        }
+    }
+    uint32_t savedcount() {
+        return (detectedphoton > maxdetphotons ? maxdetphotons : detectedphoton);
+    }
+};
 /// MCX_rand provides the xorshift128p random number generator
 struct MCX_rand { // per thread
     uint64_t t[2];
@@ -157,7 +196,7 @@ struct MCX_rand { // per thread
 struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,unused*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
-    int lastvoxelidx, mediaid;
+    int lastvoxelidx = -1, mediaid = 0;
 
     MCX_photon(const float4& p0, const float4& v0) { // constructor
         launch(p0, v0);
@@ -168,25 +207,31 @@ struct MCX_photon { // per thread
         rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
         len = float4(NAN, 0.f, 0.f, pos.w);
         ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
-        lastvoxelidx = -1;
-        mediaid = 0;
     }
-    template<const bool isreflect>              // main function to run a single photon from lunch to termination
-    void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) {
+    template<const bool isreflect, const bool issavedet>              // main function to run a single photon from lunch to termination
+    void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
 
-        while (sprint<isreflect>(invol, outvol, props, ran, gcfg) == 0) {
+        while (sprint<isreflect, issavedet>(invol, outvol, props, ran, detphotonbuffer, gcfg) == 0) {
             scatter(props[(mediaid & MED_MASK)], ran);
         }
+
+        if (issavedet && (mediaid & DET_MASK) && len.y <= gcfg.tend) {
+            savedetector(detpos, detdata, detphotonbuffer, gcfg);
+        }
     }
-    template<const bool isreflect>              // run from one scattering site to the next, return 1 when terminate
-    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, const MCX_param& gcfg) {
+    template<const bool isreflect, const bool issavedet>              // run from one scattering site to the next, return 1 when terminate
+    int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, float detphotonbuffer[], const MCX_param& gcfg) {
         while (len.x > 0.f) {
             int newvoxelid = step(invol, props[(mediaid & MED_MASK)]);
 
             if (newvoxelid != lastvoxelidx) {   // only save when moving out of a voxel
+                if (issavedet && (gcfg.savedetflag & dpPPath) && ((mediaid & MED_MASK) > 0)) {
+                    detphotonbuffer[(mediaid & MED_MASK) - 1] += len.z;
+                }
+
                 if (gcfg.issavevol) {
                     save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))), props[(mediaid & MED_MASK)].mua, gcfg);
                 }
@@ -325,6 +370,14 @@ struct MCX_photon { // per thread
         float tmp0 = 1.f / sqrtf(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
         vec *= tmp0;
     }
+    void savedetector(const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], const MCX_param& gcfg) {
+        for (int i = 0; i < gcfg.detnum; i++) {
+            if ((detpos[i].x - pos.x) * (detpos[i].x - pos.x) + (detpos[i].y - pos.y) * (detpos[i].y - pos.y) +
+                    (detpos[i].z - pos.z) * (detpos[i].z - pos.z) < detpos[i].w * detpos[i].w) {
+                detdata.addphoton(i + 1, pos, vec, detphotonbuffer, gcfg);
+            }
+        }
+    }
     void sincosf(float ang, float* sine, float* cosine) {
         *sine = sinf(ang);
         *cosine = cosf(ang);
@@ -346,8 +399,8 @@ enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_sph
 struct MCX_userio {
     json cfg;
     MCX_volume<int> domain;
-    const std::map<std::set<std::string>, std::pair<std::string, char>> cmdflags = {{{"-n", "--photon"}, {"/Session/Photons", 'f'}}, {{"-b", "--reflect"}, {"/Session/DoMismatch", 'i'}}, {{"-s", "--session"}, {"/Session/ID", 's'}},
-        {{"-u", "--unitinmm"}, {"/Domain/LengthUnit", 'f'}}, {{"-U", "--normalize"}, {"/Session/DoNormalize", 'i'}}, {{"-E", "--seed"}, {"/Session/RNGSeed", 'i'}}, {{"-O", "--outputtype"}, {"/Session/OutputType", 's'}},
+    const std::map<std::set<std::string>, std::pair<std::string, char>> cmdflags = {{{"-n", "--photon"}, {"/Session/Photons", 'f'}}, {{"-b", "--reflect"}, {"/Session/DoMismatch", 'i'}}, {{"-s", "--session"}, {"/Session/ID", 's'}}, {{"-H", "--maxdetphoton"}, {"/Session/MaxDetPhoton", 'i'}},
+        {{"-u", "--unitinmm"}, {"/Domain/LengthUnit", 'f'}}, {{"-U", "--normalize"}, {"/Session/DoNormalize", 'i'}}, {{"-E", "--seed"}, {"/Session/RNGSeed", 'i'}}, {{"-O", "--outputtype"}, {"/Session/OutputType", 's'}}, {{"-w", "--savedetflag"}, {"/Session/SaveDetFlag", 'i'}},
         {{"-d", "--savedet"}, {"/Session/DoPartialPath", 'i'}}, {{"-t", "--thread"}, {"/Session/ThreadNum", 'i'}}, {{"-T", "--blocksize"}, {"/Session/BlockSize", 'i'}}, {{"-G", "--gpuid"}, {"/Session/DeviceID", 'i'}}, {{"-S", "--save2pt"}, {"/Session/DoSaveVolume", 'i'}}
     };
     const std::map<std::string, std::function<int(float4 p, json obj)>> shapeparser = {
@@ -402,7 +455,7 @@ struct MCX_userio {
             std::cout << cfg.dump(4) << std::endl;
             std::exit(0);
         } else if (std::find(params.begin(), params.end(), "--dumpmask") != params.end()) {
-            save(domain, 1.f, (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_vol.bnii" : "vol.bnii"));
+            savevolume(domain, 1.f, (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_vol.bnii" : "vol.bnii"));
             std::exit(0);
         }
     }
@@ -516,7 +569,7 @@ struct MCX_userio {
         inputjson >> cfg;
     }
     template<class T>
-    void save(MCX_volume<T>& outputvol, float normalizer = 1.f, std::string outputfile = "") {
+    void savevolume(MCX_volume<T>& outputvol, float normalizer = 1.f, std::string outputfile = "") {
         if (normalizer != 1.f) {
             outputvol.scale(normalizer);
         }
@@ -530,39 +583,48 @@ struct MCX_userio {
                 }
             }
         };
+        savebjdata(bniifile, (outputfile.length() ? outputfile : (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + ".bnii" : "output.bnii")));
+    }
+    void savedetphoton(MCX_detect& detdata, const MCX_param& gcfg, std::string outputfile = "") {
+        json bdetpfile = {{"MCXData", {
+                    {"Info", {{"Version", 1}, {"MediaNum", gcfg.mediumnum}, {"DetNum", gcfg.detnum}, {"ColumnNum", detdata.detphotondatalen}, {"TotalPhoton", detdata.detphotondatalen}, {"DetectedPhoton", detdata.detectedphoton}, {"SavedPhoton", detdata.savedcount()}, {"LengthUnit", gcfg.unitinmm}} },
+                    {
+                        "PhotonRawData", {{"_ArraySize_", {detdata.savedcount(), detdata.detphotondatalen}},
+                            {"_ArrayType_", "single"}, {"_ArrayData_", std::vector<float>(detdata.detphotondata, detdata.detphotondata + (detdata.savedcount() * detdata.detphotondatalen))}
+                        }
+                    }
+                }
+            }
+        };
+        savebjdata(bdetpfile, (outputfile.length() ? outputfile : (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_detp.jdb" : "output_detp.jdb")));
+    }
+    void savebjdata(json& bjdata, std::string outputfile = "") {
         outputfile = (outputfile.length() ? outputfile : (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + ".bnii" : "output.bnii"));
         std::ofstream outputdata(outputfile, std::ios::out | std::ios::binary);
-        json::to_bjdata(bniifile, outputdata, true, true);
+        json::to_bjdata(bjdata, outputdata, true, true);
         outputdata.close();
     }
 };
-/////////////////////////////////////////////////
-/// \brief main function
-/////////////////////////////////////////////////
-int main(int argn, char* argv[]) {
-    if (argn == 1) {
-        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
-        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
-        return 0;
-    }
-
+/// Main MCX simulation function, parsing user inputs via string arrays in argv[argn], can be called repeatedly
+int MCX_run_simulation(char* argv[], int argn = 1) {
     MCX_userio io(argv, argn);
     const MCX_param gcfg = {
         /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
         /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f), /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
         /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1), /*.issavevol*/ (io.cfg["Session"].contains("DoSaveVolume") ? io.cfg["Session"]["DoSaveVolume"].get<int>() : 1),
+        /*.issavedet*/ (io.cfg["Session"].contains("DoPartialPath") ? io.cfg["Session"]["DoPartialPath"].get<int>() : 1), /*.savedetflag*/ (io.cfg["Session"].contains("SaveDetFlag") ? io.cfg["Session"]["SaveDetFlag"].get<int>() : (dpDetID + dpPPath)),
         /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "x")[0]),
-        /*.detnum*/ (io.cfg["Optode"].contains("Detector") ? (int)io.cfg["Optode"]["Detector"].size() : 0)
+        /*.detnum*/ (io.cfg["Optode"].contains("Detector") ? (int)io.cfg["Optode"]["Detector"].size() : 0), /*.maxdetphoton*/ (io.cfg["Session"].contains("MaxDetPhoton") ? io.cfg["Session"]["MaxDetPhoton"].get<int>() : 1000000),
     };
     MCX_volume<int> inputvol = io.domain;
     MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);
+    MCX_detect detdata(gcfg);
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
+    float4* detpos = new float4[gcfg.detnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
         prop[i] = MCX_medium(JNUM(io.cfg["Domain"]["Media"], i, "mua") * gcfg.unitinmm, JNUM(io.cfg["Domain"]["Media"], i, "mus") * gcfg.unitinmm, io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
     }
-
-    float4* detpos = new float4[gcfg.detnum];
 
     for (int i = 0; i < gcfg.detnum; i++) {
         detpos[i] = float4(JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 0), JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 1), JNUM(io.cfg["Optode"]["Detector"][i], "Pos", 2), JNUM(io.cfg["Optode"]["Detector"], i, "R"));
@@ -578,6 +640,7 @@ int main(int argn, char* argv[]) {
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
+    const int totaldetphotondatalen = gcfg.issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 0;
     const int deviceid = JHAS(io.cfg["Session"], "DeviceID", int, 1) - 1, gridsize = JHAS(io.cfg["Session"], "ThreadNum", int, 10000) / JHAS(io.cfg["Session"], "BlockSize", int, 64);
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
     const int blocksize = JHAS(io.cfg["Session"], "BlockSize", int, 64) / 32;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
@@ -586,32 +649,78 @@ int main(int argn, char* argv[]) {
 #endif
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) device(deviceid) \
     map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) map(to: detpos[0:gcfg.detnum]) reduction(+ : energyescape) firstprivate(ran, p) \
-    map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt])
+    map(to: inputvol) map(to: inputvol.vol[0:inputvol.dimxyzt]) map(tofrom: outputvol) map(tofrom: outputvol.vol[0:outputvol.dimxyzt]) \
+    map(tofrom: detdata) map(tofrom: detdata.detphotondata[0:totaldetphotondatalen])
 #else
     #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
 #endif
 
     for (uint64_t i = 0; i < nphoton; i++) {
+#ifdef USE_MALLOC
+        float* detphotonbuffer = (float*)malloc(sizeof(float) * detdata.ppathlen);
+        memset(detphotonbuffer, 0, sizeof(float) * detdata.ppathlen);
+#else
+        float detphotonbuffer[10] = {0.f};   // TODO: if changing 10 to detdata.ppathlen, speed of nvc++ built binary drops by 5x to 10x
+#endif
         ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
         p.launch(pos, dir);
 
-        if (gcfg.isreflect) {
-            p.run<true>(inputvol, outputvol, prop, ran, gcfg);
-        } else {
-            p.run<false>(inputvol, outputvol, prop, ran, gcfg);
+        switch (gcfg.isreflect * 10 + gcfg.issavedet) {
+            case 11:
+                p.run<true, true>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
+                break;
+
+            case 10:
+                p.run<true, false>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
+                break;
+
+            case 01:
+                p.run<false, true>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
+                break;
+
+            case 00:
+                p.run<false, false>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
+                break;
         }
 
         energyescape += p.pos.w;
+#ifdef USE_MALLOC
+        free(detphotonbuffer);
+#endif
     }
 
     float normalizer = (gcfg.outputtype == otEnergy) ? (1.f / nphoton) : ((gcfg.outputtype == otFluenceRate) ? gcfg.rtstep / (nphoton * gcfg.unitinmm * gcfg.unitinmm) : 1.f / (nphoton * gcfg.unitinmm * gcfg.unitinmm));
-    printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, normalizer %.6f, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), normalizer, (nphoton - energyescape) / nphoton * 100.);
+    printf("simulated energy %.2f, speed %.2f photon/ms, duration %.6f ms, normalizer %.6f, detected %d, absorbed %.6f%%\n", (double)nphoton, nphoton / timer.elapse(), timer.elapse(), normalizer, detdata.savedcount(), (nphoton - energyescape) / nphoton * 100.);
 
     if (gcfg.issavevol) {
-        io.save<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
+        io.savevolume<float>(outputvol, gcfg.isnormalized ? normalizer : 1.f);
+    }
+
+    if (gcfg.issavedet) {
+        io.savedetphoton(detdata, gcfg);
     }
 
     delete [] prop;
     delete [] detpos;
     return 0;
+}
+/// APIs to call umcx simulations inside a C program
+extern "C" int MCX_run_cmd(char* argv[], int argn) {
+    return MCX_run_simulation(argv, argn);
+}
+extern "C" int MCX_run_json(char* jsoninput) {
+    char* cmdflags[] = {(char*)"--json", jsoninput};
+    return MCX_run_simulation(cmdflags, 2);
+}
+/////////////////////////////////////////////////
+/// \brief main function
+/////////////////////////////////////////////////
+int main(int argn, char* argv[]) {
+    if (argn == 1) {
+        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
+        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
+        return 0;
+    }
+
+    return MCX_run_simulation(argv, argn);
 }

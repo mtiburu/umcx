@@ -25,9 +25,7 @@ jobs:
       - name: Install dependencies (Windows only)
         if: ${{ runner.os == 'Windows' }}
         run: |
-          choco install mingw --version=13.2.0
-          #echo 'C:\ProgramData\Chocolatey\lib\mingw\tools\install\mingw64\bin\' >> $GITHUB_PATH
-          #echo 'MW_MINGW64_LOC=/c/ProgramData/Chocolatey/lib/mingw/tools/install/mingw64/' >> $GITHUB_ENV
+          choco install mingw --version=10.2.0
           echo 'C:\ProgramData\mingw64\mingw64\bin' >> $GITHUB_PATH
           echo 'MW_MINGW64_LOC=/c/ProgramData/mingw64/mingw64/' >> $GITHUB_ENV
       - name: Build binary on MacOS
@@ -98,9 +96,8 @@ jobs:
           make nvidia CXX=g++-12
       - name: Run tests for g++-12
         run: |
-          cd bin
-          ./umcx cube60 || true
-          ./umcx cube60b || true
+          cd test
+          ./testumcx.sh || true
       - name: Build binary g++-13
         run: |
           cd src

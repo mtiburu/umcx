@@ -630,10 +630,10 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
 
     for (uint64_t i = 0; i < nphoton; i++) {
 #ifdef USE_MALLOC
-        float* detphotonbuffer = (float*)malloc(sizeof(float) * detdata.ppathlen);
-        memset(detphotonbuffer, 0, sizeof(float) * detdata.ppathlen);
+        float* detphotonbuffer = (float*)malloc(sizeof(float) * detdata.ppathlen * issavedet);
+        memset(detphotonbuffer, 0, sizeof(float) * detdata.ppathlen * issavedet);
 #else
-        float detphotonbuffer[10] = {0.f};   // TODO: if changing 10 to detdata.ppathlen, speed of nvc++ built binary drops by 5x to 10x
+        float detphotonbuffer[issavedet ? 10 : 0] = {};   // TODO: if changing 10 to detdata.ppathlen, speed of nvc++ built binary drops by 5x to 10x
 #endif
         ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
         p.launch(pos, dir);

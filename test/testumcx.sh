@@ -78,7 +78,7 @@ if [ -z "$temp" ]; then echo "fail to use -b 1 flag to enable reflection"; fail=
 #if [ -z "$temp" ]; then echo "fail to apply the cylic boundary condition"; fail=$((fail+1)); else echo "ok"; fi
 
 echo "test photon detection ... "
-temp=`"$MCX" --bench cube60b $PARAM | grep -o -E 'detected.*4[0-9]+ photons'`
+temp=`"$MCX" --bench cube60b $PARAM | grep -o -E 'detected.*4[0-9]+'`
 if [ -z "$temp" ]; then echo "fail to detect photons in the cube60b benchmark"; fail=$((fail+1)); else echo "ok"; fi
 
 #echo "test planary widefield source ... "

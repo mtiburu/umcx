@@ -37,12 +37,12 @@ echo "test built-in benchmark listing ... "
 temp=`"$MCX" | grep 'cube60'`
 if [ -z "$temp" ]; then echo "fail to print built-in benchmarks"; fail=$((fail+1)); else echo "ok"; fi
 
-#echo "test exporting json input from builtin examples ... "
-#temp=`"$MCX" --bench cube60 --dumpjson - | grep '"Name":\s*"cubic60"'`
-#if [ -z "$temp" ]; then echo "fail to dump json input shape from builtin example"; fail=$((fail+1)); else echo "ok"; fi
+echo "test exporting json input from builtin examples ... "
+temp=`"$MCX" --bench cube60 --dumpjson | grep '"ID":\s*"cube60"'`
+if [ -z "$temp" ]; then echo "fail to dump json input shape from builtin example"; fail=$((fail+1)); else echo "ok"; fi
 
 #echo "test exporting json input from builtin examples with volume data ... "
-#temp=`"$MCX" --bench colin27 --dumpjson - | grep -o -E '"_ArrayZipData_":\s*"eAHs3YuCo7iSBNC'`
+#temp=`"$MCX" --bench colin27 --dumpjson | grep -o -E '"_ArrayZipData_":\s*"eAHs3YuCo7iSBNC'`
 #if [ -z "$temp" ]; then echo "fail to dump json input with volume from builtin example"; fail=$((fail+1)); else echo "ok"; fi
 
 #echo "test default options ... "
@@ -50,12 +50,12 @@ if [ -z "$temp" ]; then echo "fail to print built-in benchmarks"; fail=$((fail+1
 #if [ "$temp" -ne "14" ]; then echo "fail to verify default options "; fail=$((fail+1)); else echo "ok"; fi
 
 #echo "test exporting builtin volume with gzip compression ... "
-#temp=`"$MCX" --bench colin27 --dumpjson - --zip gzip | grep -o -E '"_ArrayZipData_":\s*"H4sIAAAAAAAA/\+z'`
+#temp=`"$MCX" --bench colin27 --dumpjson --zip gzip | grep -o -E '"_ArrayZipData_":\s*"H4sIAAAAAAAA/\+z'`
 #if [ -z "$temp" ]; then echo "fail to set gzip compression for volume exporting"; fail=$((fail+1)); else echo "ok"; fi
 
-#echo "test json input modifier --json ... "
-#temp=`"$MCX" --bench cube60 --json '{"Optode":{"Source":{"Type":"isotropic","Pos":[29,29,29]}}}' --dumpjson 1 $PARAM | grep 'isotropic'`
-#if [ -z "$temp" ]; then echo "fail to modify input via --json"; fail=$((fail+1)); else echo "ok"; fi
+echo "test json input modifier --json ... "
+temp=`"$MCX" --bench cube60 --json '{"Optode":{"Source":{"Type":"isotropic","Pos":[29,29,29]}}}' --dumpjson $PARAM | grep 'isotropic'`
+if [ -z "$temp" ]; then echo "fail to modify input via --json"; fail=$((fail+1)); else echo "ok"; fi
 
 echo "test homogeneous domain simulation ... "
 temp=`"$MCX" --bench cube60 -S 0 $PARAM | grep -o -E 'absorbed.*17\.[0-9]+%'`
@@ -81,17 +81,17 @@ echo "test photon detection ... "
 temp=`"$MCX" --bench cube60b $PARAM | grep -o -E 'detected.*4[0-9]+'`
 if [ -z "$temp" ]; then echo "fail to detect photons in the cube60b benchmark"; fail=$((fail+1)); else echo "ok"; fi
 
-#echo "test planary widefield source ... "
-#temp=`"$MCX" --bench cube60planar $PARAM | grep -o -E 'absorbed.*25\.[0-9]+%'`
-#if [ -z "$temp" ]; then echo "fail to run cube60planar benchmark"; fail=$((fail+1)); else echo "ok"; fi
+echo "test planary widefield source ... "
+temp=`"$MCX" --bench cube60planar $PARAM | grep -o -E 'absorbed.*25\.[0-9]+%'`
+if [ -z "$temp" ]; then echo "fail to run cube60planar benchmark"; fail=$((fail+1)); else echo "ok"; fi
 
-#echo "test isotropic source ... "
-#temp=`"$MCX" --bench cube60 --json '{"Optode":{"Source":{"Type":"isotropic","Pos":[29,29,29]}}}' -d 0 -S 0 $PARAM | grep -o -E 'absorbed:.*88\.[0-9]+%'`
-#if [ -z "$temp" ]; then echo "fail to run isotropic source"; fail=$((fail+1)); else echo "ok"; fi
+echo "test isotropic source ... "
+temp=`"$MCX" --bench cube60 --json '{"Optode":{"Source":{"Type":"isotropic","Pos":[29,29,29]}}}' -d 0 -S 0 $PARAM | grep -o -E 'absorbed.*88\.[0-9]+%'`
+if [ -z "$temp" ]; then echo "fail to run isotropic source"; fail=$((fail+1)); else echo "ok"; fi
 
-#echo "test cone beam source ... "
-#temp=`"$MCX" --bench cube60 --json '{"Domain":{"Media":[[0,0,1,1],[0.001,0.001,0,1]]},"Optode":{"Source":{"Type":"cone","Param1":[0.5,0,0,0]}}}' -d 0 -S 0 $PARAM | grep -o -E 'absorbed:.*6\.[0-9]+%'`
-#if [ -z "$temp" ]; then echo "fail to run cone beam source"; fail=$((fail+1)); else echo "ok"; fi
+echo "test cone beam source ... "
+temp=`"$MCX" --bench cube60 --json '{"Domain":{"Media":[[0,0,1,1],[0.001,0.001,0,1]]},"Optode":{"Source":{"Type":"cone","Param1":[0.5,0,0,0]}}}' -d 0 -S 0 $PARAM | grep -o -E 'absorbed.*6\.[0-9]+%'`
+if [ -z "$temp" ]; then echo "fail to run cone beam source"; fail=$((fail+1)); else echo "ok"; fi
 
 #echo "test Fourier source ... "
 #temp=`"$MCX" --bench cube60planar --json '{"Optode":{"Source":{"Type":"fourier","Param1":[40,0,0,2]}}}' -d 0 -S 0 $PARAM | grep -o -E 'absorbed:.*25\.[0-9]+%'`

@@ -27,7 +27,6 @@
 #define TRANSMIT_PHOTON(dir) (vec.dir = ((tmp0 = vec.x * vec.x + vec.y * vec.y + vec.z * vec.z - vec.dir * vec.dir) < 1.f) ? sqrtf(1.f - tmp0) * ((vec.dir > 0.f) - (vec.dir < 0.f)) : 0.f)
 #define JNUM(o, key1, key2)  (o[key1][key2].get<float>())
 #define JVAL(o, key1, type)  (o[key1].get<type>())
-#define JHAS(o, key1, type, default)   (o.contains(key1) ? (o[key1].get<type>()) : (default))
 #define DET_MASK             0x80000000u              /**< mask of the sign bit to get the detector */
 #define MED_MASK             0x7FFFFFFFu              /**< mask of the remaining bits to get the medium index */
 #define PASS                 (void(0))                /**< no operation, do nothing */
@@ -36,6 +35,11 @@ using json = nlohmann::ordered_json;
 
 const std::string MCX_outputtype = "xfe";
 enum MCX_outputtypeid {otFluenceRate, otFluence, otEnergy};
+const json MCX_sourcetype = {"pencil", "isotropic", "cone", "disk", "planar"};
+enum MCX_sourcetypeid {stPencil, stIsotropic, stCone, stDisk, stPlanar, stUnknown};
+const json MCX_benchmarks = {"cube60", "cube60b", "cube60planar", "cubesph60b", "sphshells", "spherebox", "skinvessel"};
+enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cube60planar, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel, bm_unknown};
+enum MCX_detflags {dpDetID = 1, dpPPath = 4, dpExitPos = 16, dpExitDir = 32};
 #pragma omp declare target
 /// basic data type: float4 class, providing 4x float elements {x,y,z,w}, used for representing photon states
 struct float4 {
@@ -67,7 +71,8 @@ struct MCX_medium {
 /// Global simulation settings, all constants throughout the simulation
 struct MCX_param {
     float tstart, tend, rtstep, unitinmm;
-    int maxgate, isreflect, isnormalized, issavevol, issavedet, savedetflag, mediumnum, outputtype, detnum, maxdetphotons;
+    int maxgate, isreflect, isnormalized, issavevol, issavedet, savedetflag, mediumnum, outputtype, detnum, maxdetphotons, srctype;
+    float4 srcparam1, srcparam2;
 };
 #pragma omp end declare target
 /// MCX_volume class manages input and output volume
@@ -120,7 +125,6 @@ struct MCX_volume { // shared, read-only
     }
 };
 /// MCX_detect class manages detected photon buffer
-enum MCX_detflags {dpDetID = 1, dpPPath = 4, dpExitPos = 16, dpExitDir = 32};
 #pragma omp declare target
 struct MCX_detect { // shared, read-only
     uint32_t detectedphoton = 0, maxdetphotons = 0;
@@ -191,23 +195,50 @@ struct MCX_rand { // per thread
 };
 /// MCX_photon class performs MC simulation of a single photon
 struct MCX_photon { // per thread
-    float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,unused*/, len /*{pscat,t,pathlen,p0}*/;
+    float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,last_move*/, len /*{pscat,t,pathlen,p0}*/;
     short4 ipos /*{ix,iy,iz,flipdir}*/;
     int lastvoxelidx = -1, mediaid = 0;
 
-    MCX_photon(const float4& p0, const float4& v0) { // constructor
-        launch(p0, v0);
+    MCX_photon(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { // constructor
+        launch(p0, v0, ran, gcfg);
     }
-    void launch(const float4& p0, const float4& v0) { // launch photon
+    void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { // launch photon
         pos = p0;
         vec = v0;
-        rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 1.f);
+
+        if (gcfg.srctype == stIsotropic || gcfg.srctype == stCone) { // isotropic source or cone beam
+            rvec.x = (FLT_PI * 2.f) * ran.rand01();
+            sincosf(rvec.x, &len.z, &len.w);
+            rvec.x = (gcfg.srctype == stIsotropic) ? acosf(2.f * ran.rand01() - 1.f) : (len.x = cosf(gcfg.srcparam1.x), acosf(ran.rand01() * (1.0f - len.x) + len.x));    //sine distribution
+            sincosf(rvec.x, &len.x, &len.y);
+            rotatevector(len.x, len.y, len.z, len.w);
+        } else if (gcfg.srctype == stDisk) {                        // disk/top-hat source
+            rvec.x = (FLT_PI * 2.f) * ran.rand01();
+            sincosf(rvec.x, &len.z, &len.w);
+            rvec.x = sqrtf(ran.rand01() * fabsf(gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
+            len.x = 1.f - vec.z * vec.z;
+            len.y = rvec.x / sqrtf(len.x);
+            pos = float4(pos.x + len.y * (vec.x * vec.z * len.w - vec.y * len.z), pos.y + len.y * (vec.y * vec.z * len.w + vec.x * len.z), pos.z - len.y * len.x * len.w, pos.w);
+        } else if (gcfg.srctype == stPlanar) {                      // planar source
+            len.x = ran.rand01();
+            len.y = ran.rand01();
+            pos = float4(pos.x + len.x * gcfg.srcparam1.x + len.y * gcfg.srcparam2.x, pos.y + len.x * gcfg.srcparam1.y + len.y * gcfg.srcparam2.y, pos.z + len.x * gcfg.srcparam1.z + len.y * gcfg.srcparam2.z, pos.w);
+        }
+
+        rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 0.f);
         len = float4(NAN, 0.f, 0.f, pos.w);
         ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
     }
     template<const bool isreflect, const bool issavedet>              // main function to run a single photon from lunch to termination
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
+
+        if (lastvoxelidx < 0) { // widefield source, launch position is outside of the domain bounding box
+            if (skip(invol) < 0.f) { // ray never intersect with the voxel domain bounding box
+                return;
+            }
+        }
+
         mediaid = invol.get(lastvoxelidx);
         len.x = ran.next_scat_len();
 
@@ -255,23 +286,23 @@ struct MCX_photon { // per thread
         return 0;
     }
     int step(MCX_volume<int>& invol, MCX_medium& prop) {
-        float dist, htime[3];
+        float htime[3];
 
         htime[0] = fabsf((ipos.x + (vec.x > 0.f) - pos.x) * rvec.x);  //< time-of-flight to hit the wall in each direction
         htime[1] = fabsf((ipos.y + (vec.y > 0.f) - pos.y) * rvec.y);
         htime[2] = fabsf((ipos.z + (vec.z > 0.f) - pos.z) * rvec.z);
-        dist = fminf(fminf(htime[0], htime[1]), htime[2]);            //< get the direction with the smallest time-of-flight
-        ipos.w = (dist == htime[0] ? 0 : (dist == htime[1] ? 1 : 2)); //< determine which axis plane the photon crosses
+        rvec.w = fminf(fminf(htime[0], htime[1]), htime[2]);            //< get the direction with the smallest time-of-flight
+        ipos.w = (rvec.w == htime[0] ? 0 : (rvec.w == htime[1] ? 1 : 2)); //< determine which axis plane the photon crosses
 
-        htime[0] = dist * prop.mus;
+        htime[0] = rvec.w * prop.mus;
         htime[0] = fminf(htime[0], len.x);
         htime[1] = (htime[0] != len.x); // is continue next voxel?
-        dist = (prop.mus == 0.f) ? dist : (htime[0] / prop.mus);
-        pos = float4(pos.x + dist * vec.x, pos.y + dist * vec.y, pos.z + dist * vec.z, pos.w * expf(-prop.mua * dist));
+        rvec.w = (prop.mus == 0.f) ? rvec.w : (htime[0] / prop.mus);
+        pos = float4(pos.x + rvec.w * vec.x, pos.y + rvec.w * vec.y, pos.z + rvec.w * vec.z, pos.w * expf(-prop.mua * rvec.w));
 
         len.x -= htime[0];
-        len.y += dist * prop.n * ONE_OVER_C0;
-        len.z += dist;
+        len.y += rvec.w * prop.n * ONE_OVER_C0;
+        len.z += rvec.w;
 
         if (htime[1] > 0.f) { // photon need to move to next voxel
             (ipos.w == 0) ? (ipos.x += (vec.x > 0.f ? 1 : -1)) :
@@ -282,17 +313,38 @@ struct MCX_photon { // per thread
 
         return lastvoxelidx;
     }
+    float skip(MCX_volume<int>& invol) {
+        len.x = -pos.x * rvec.x;  //< time-of-flight to hit the x=y=z=0 walls
+        len.y = -pos.y * rvec.y;
+        len.z = -pos.z * rvec.z;
+        len.w  = (invol.size.x - pos.x) * rvec.x;  //< time-of-flight to hit the x=y=z=max walls
+        rvec.w = (invol.size.y - pos.y) * rvec.y;
+        pos.w  = (invol.size.z - pos.z) * rvec.z;
+        float tmin = fmaxf(fmaxf(fminf(len.x, len.w), fminf(len.y, rvec.w)), fminf(len.z, pos.w));
+        float tmax = fminf(fminf(fmaxf(len.x, len.w), fmaxf(len.y, rvec.w)), fmaxf(len.z, pos.w));
+
+        if (tmax < 0.f || tmin > tmax) {
+            return -1.f;
+        } else {
+            pos = float4(pos.x + tmin * vec.x, pos.y + tmin * vec.y, pos.z + tmin * vec.z, 1.f);
+            len = float4(NAN, 0.f, 0.f, pos.w);
+            ipos = short4((short)pos.x, (short)pos.y, (short)pos.z, -1);
+            lastvoxelidx = invol.index(ipos.x, ipos.y, ipos.z, 0);
+        }
+
+        return tmin;
+    }
     void save(MCX_volume<float>& outvol, int tshift, float mua, const MCX_param& gcfg) {
         outvol.add(gcfg.outputtype == otEnergy ? (len.w - pos.w) : (mua < FLT_EPSILON ? (len.w * len.z) : (len.w - pos.w) / mua), lastvoxelidx + tshift * outvol.dimxyz);
         len.w = pos.w;
         len.z = 0.f;
     }
     void scatter(MCX_medium& prop, MCX_rand& ran) {
-        float tmp0, sphi, cphi, theta, stheta, ctheta;
+        float tmp0;
         len.x = ran.next_scat_len();
 
         tmp0 = (2.f * FLT_PI) * ran.rand01(); //next arimuth angle
-        sincosf(tmp0, &sphi, &cphi);
+        sincosf(tmp0, &rvec.z, &rvec.w);
 
         if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
             tmp0 = (1.f - prop.g * prop.g) / (1.f - prop.g + 2.f * prop.g * ran.rand01());
@@ -300,16 +352,16 @@ struct MCX_photon { // per thread
             tmp0 = (1.f + prop.g * prop.g - tmp0) / (2.f * prop.g);
             tmp0 = fmaxf(-1.f, fminf(1.f, tmp0));
 
-            theta = acosf(tmp0);
-            stheta = sinf(theta);
-            ctheta = tmp0;
+            rvec.x = acosf(tmp0);
+            rvec.x = sinf(rvec.x);
+            rvec.y = tmp0;
         } else {
-            theta = acosf(2.f * ran.rand01() - 1.f);
-            sincosf(theta, &stheta, &ctheta);
+            tmp0 = acosf(2.f * ran.rand01() - 1.f);
+            sincosf(tmp0, &rvec.x, &rvec.y);
         }
 
-        rotatevector(stheta, ctheta, sphi, cphi);
-        rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, 1.f);
+        rotatevector(rvec.x, rvec.y, rvec.z, rvec.w);
+        rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, rvec.w);
         vec.w++; // stops at 16777216 due to finite precision
     }
     float reflectcoeff(float n1, float n2) {
@@ -390,8 +442,6 @@ struct MCX_clock {
         return elapsetime.count() * 1000.;
     }
 };
-const json MCX_benchmarks = {"cube60", "cube60b", "cubesph60b", "sphshells", "spherebox", "skinvessel"};
-enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel, bm_unknown};
 /// MCX_userio parses user JSON input and saves output to binary JSON files
 struct MCX_userio {    // main user IO handling interface, must be isolated with omp target/GPU code, can use non-trivially copyable classes such as json or STL
     json cfg;
@@ -441,7 +491,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
                             break;
                         }
                     }
-                } else {
+                } else if (!(arg == "--dumpjson" || arg == "--dumpmask")) {
                     throw std::runtime_error(std::string("incomplete input parameter: ") + arg + "; every -flag/--flag must be followed by a valid value");
                 }
             }
@@ -465,7 +515,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
     }
     void printhelp() {
         std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
-        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
+        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed [1648335518]\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
         std::exit(0);
     }
     void initdomain() {
@@ -482,6 +532,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
                 for (const auto& obj : cfg["Shapes"])
                     if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
                         #pragma omp parallel for collapse(2)
+
                         for (uint32_t z = 0; z < domain.size.z; z++)
                             for (uint32_t y = 0; y < domain.size.y; y++)
                                 for (uint32_t x = 0; x < domain.size.x; x++) {
@@ -546,8 +597,12 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}])"_json;
         cfg["Session"]["DoMismatch"] = !((int)(bmid == bm_cube60 || bmid == bm_skinvessel || bmid == bm_spherebox));
 
-        if (bmid == bm_cubesph60b) {
+        if (bmid == bm_cubesph60b || bmid == bm_cube60planar) {
             cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}, {"Sphere": {"O": [30, 30, 30], "R": 15, "Tag": 2}}])"_json;
+
+            if (bmid == bm_cube60planar) {
+                cfg["Optode"]["Source"] = R"({"Type": "planar", "Pos": [10.0, 10.0, -10.0], "Dir": [0.0, 0.0, 1.0], "Param1": [40.0, 0.0, 0.0, 0.0], "Param2": [0.0, 40.0, 0.0, 0.0]})"_json;
+            }
         } else if (bmid == bm_skinvessel) {
             cfg["Shapes"] = R"([{"Grid": {"Size": [200, 200, 200], "Tag": 1}}, {"ZLayers": [[1, 20, 1], [21, 32, 4], [33, 200, 3]]}, {"Cylinder": {"Tag": 2, "C0": [0, 100.5, 100.5], "C1": [200, 100.5, 100.5], "R": 20}}])"_json;
             cfg["Forward"] = {{"T0", 0.0}, {"T1", 5e-8}, {"Dt", 5e-8}};
@@ -616,14 +671,14 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
     const float4 pos = {cfg["Optode"]["Source"]["Pos"][0].get<float>(), cfg["Optode"]["Source"]["Pos"][1].get<float>(), cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};
     const float4 dir = {cfg["Optode"]["Source"]["Dir"][0].get<float>(), cfg["Optode"]["Source"]["Dir"][1].get<float>(), cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
-    MCX_photon p(pos, dir);
+    MCX_photon p(pos, dir, ran, gcfg);
 #ifdef GPU_OFFLOAD
     const int totaldetphotondatalen = issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 1;
-    const int deviceid = JHAS(cfg["Session"], "DeviceID", int, 1) - 1, gridsize = JHAS(cfg["Session"], "ThreadNum", int, 100000) / JHAS(cfg["Session"], "BlockSize", int, 64);
+    const int deviceid = cfg["Session"].value("DeviceID", 1) - 1, gridsize = cfg["Session"].value("ThreadNum", 100000) / cfg["Session"].value("BlockSize", 64);
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
-    const int blocksize = JHAS(cfg["Session"], "BlockSize", int, 64) / 32;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
+    const int blocksize = cfg["Session"].value("BlockSize", 64) / 32;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
 #else
-    const int blocksize = JHAS(cfg["Session"], "BlockSize", int, 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
+    const int blocksize = cfg["Session"].value("BlockSize", 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
     #pragma omp target data map(to: pos) map(to: dir) map(to: seeds) map(to: gcfg) map(to: prop[0:gcfg.mediumnum]) map(to: detpos[0:gcfg.detnum])
     #pragma omp target data map(to: inputvol) map(tofrom: outputvol) map(tofrom: detdata)
@@ -641,7 +696,7 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
         float detphotonbuffer[issavedet ? 10 : 1] = {};   // TODO: if changing 10 to detdata.ppathlen, speed of nvc++ built binary drops by 5x to 10x
 #endif
         ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
-        p.launch(pos, dir);
+        p.launch(pos, dir, ran, gcfg);
         p.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
         energyescape += p.pos.w;
 #ifdef USE_MALLOC
@@ -654,13 +709,17 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
 /// Main MCX simulation function, parsing user inputs via string arrays in argv[argn], can be called repeatedly
 int MCX_run_simulation(char* argv[], int argn = 1) {
     MCX_userio io(argv, argn);
+    std::vector<float> srcparam1 = io.cfg["Optode"]["Source"].value("Param1", std::vector<float> {0.f, 0.f, 0.f, 0.f});
+    std::vector<float> srcparam2 = io.cfg["Optode"]["Source"].value("Param2", std::vector<float> {0.f, 0.f, 0.f, 0.f});
     const MCX_param gcfg = {
-        /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ (io.cfg["Domain"].contains("LengthUnit") ? JNUM(io.cfg, "Domain", "LengthUnit") : 1.f),
-        /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f), /*.isreflect*/ (io.cfg["Session"].contains("DoMismatch") ? io.cfg["Session"]["DoMismatch"].get<int>() : 0),
-        /*.isnormalized*/ (io.cfg["Session"].contains("DoNormalize") ? io.cfg["Session"]["DoNormalize"].get<int>() : 1), /*.issavevol*/ (io.cfg["Session"].contains("DoSaveVolume") ? io.cfg["Session"]["DoSaveVolume"].get<int>() : 1),
-        /*.issavedet*/ (io.cfg["Session"].contains("DoPartialPath") ? io.cfg["Session"]["DoPartialPath"].get<int>() : 1), /*.savedetflag*/ (io.cfg["Session"].contains("SaveDetFlag") ? io.cfg["Session"]["SaveDetFlag"].get<int>() : (dpDetID + dpPPath)),
-        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(JHAS(io.cfg["Session"], "OutputType", std::string, "x")[0]),
-        /*.detnum*/ (io.cfg["Optode"].contains("Detector") ? (int)io.cfg["Optode"]["Detector"].size() : 0), /*.maxdetphoton*/ (io.cfg["Session"].contains("MaxDetPhoton") ? io.cfg["Session"]["MaxDetPhoton"].get<int>() : 1000000),
+        /*.tstart*/ JNUM(io.cfg, "Forward", "T0"), /*.tend*/ JNUM(io.cfg, "Forward", "T1"), /*.rtstep*/ 1.f / JNUM(io.cfg, "Forward", "Dt"), /*.unitinmm*/ io.cfg["Domain"].value("LengthUnit", 1.f),
+        /*.maxgate*/ (int)((JNUM(io.cfg, "Forward", "T1") - JNUM(io.cfg, "Forward", "T0")) / JNUM(io.cfg, "Forward", "Dt") + 0.5f), /*.isreflect*/ io.cfg["Session"].value("DoMismatch", 0),
+        /*.isnormalized*/ io.cfg["Session"].value("DoNormalize",  1), /*.issavevol*/ io.cfg["Session"].value("DoSaveVolume", 1),
+        /*.issavedet*/ io.cfg["Session"].value("DoPartialPath", 1), /*.savedetflag*/ io.cfg["Session"].value("SaveDetFlag", (dpDetID + dpPPath)),
+        /*.mediumnum*/ (int)io.cfg["Domain"]["Media"].size(), /*.outputtype*/ (int)MCX_outputtype.find(io.cfg["Session"].value("OutputType", "x")[0]),
+        /*.detnum*/ (io.cfg["Optode"].contains("Detector") ? (int)io.cfg["Optode"]["Detector"].size() : 0), /*.maxdetphoton*/ io.cfg["Session"].value("MaxDetPhoton", 1000000),
+        /*.srctype*/ (MCX_sourcetypeid)std::distance(MCX_sourcetype.begin(), std::find(MCX_sourcetype.begin(), MCX_sourcetype.end(), io.cfg["Optode"]["Source"].value("Type", "pencil"))),
+        /*.srcparam1*/ {srcparam1[0], srcparam1[1], srcparam1[2], srcparam1[3]}, /*.srcparam2*/ {srcparam2[0], srcparam2[1], srcparam2[2], srcparam2[3]}
     };
     MCX_volume<int> inputvol = io.domain;
     MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);
@@ -669,7 +728,12 @@ int MCX_run_simulation(char* argv[], int argn = 1) {
     float4* detpos = new float4[gcfg.detnum];
 
     for (int i = 0; i < gcfg.mediumnum; i++) {
-        prop[i] = MCX_medium(JNUM(io.cfg["Domain"]["Media"], i, "mua") * gcfg.unitinmm, JNUM(io.cfg["Domain"]["Media"], i, "mus") * gcfg.unitinmm, io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
+        if (io.cfg["Domain"]["Media"][i].is_array()) {
+            srcparam1 = io.cfg["Domain"]["Media"][i].get<std::vector<float>>();
+            prop[i] = MCX_medium(srcparam1[0], srcparam1[1], srcparam1[2], srcparam1[3]);
+        } else {
+            prop[i] = MCX_medium(JNUM(io.cfg["Domain"]["Media"], i, "mua") * gcfg.unitinmm, JNUM(io.cfg["Domain"]["Media"], i, "mus") * gcfg.unitinmm, io.cfg["Domain"]["Media"][i]["g"], io.cfg["Domain"]["Media"][i]["n"]);
+        }
     }
 
     for (int i = 0; i < gcfg.detnum; i++) {

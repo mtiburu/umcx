@@ -19,9 +19,6 @@
 #include <chrono>
 #include <set>
 #include <map>
-#ifdef _OPENMP
-    #include <omp.h>
-#endif
 #include "nlohmann/json.hpp"
 
 #define ONE_OVER_C0          3.335640951981520e-12f
@@ -394,9 +391,9 @@ struct MCX_clock {
     }
 };
 const json MCX_benchmarks = {"cube60", "cube60b", "cubesph60b", "sphshells", "spherebox", "skinvessel"};
-enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel};
+enum MCX_benchmarkid {bm_cube60, bm_cube60b, bm_cubesph60b, bm_sphshells, bm_spherebox, bm_skinvessel, bm_unknown};
 /// MCX_userio parses user JSON input and saves output to binary JSON files
-struct MCX_userio {
+struct MCX_userio {    // main user IO handling interface, must be isolated with omp target/GPU code, can use non-trivially copyable classes such as json or STL
     json cfg;
     MCX_volume<int> domain;
     const std::map<std::set<std::string>, std::pair<std::string, char>> cmdflags = {{{"-n", "--photon"}, {"/Session/Photons", 'f'}}, {{"-b", "--reflect"}, {"/Session/DoMismatch", 'i'}}, {{"-s", "--session"}, {"/Session/ID", 's'}}, {{"-H", "--maxdetphoton"}, {"/Session/MaxDetPhoton", 'i'}},
@@ -419,7 +416,8 @@ struct MCX_userio {
             }
         }
     };
-    MCX_userio(char* argv[], int argc = 1) {   // parsing command line
+    MCX_userio(char* argv[], int argc = 1) {   // parsing command line, argc must be greater than 1
+        (argc == 1) ? printhelp() : PASS;
         std::vector<std::string> params(argv + 1, argv + argc);
 
         if (params[0].find("-") == 0) {  // format 1: umcx -flag1 jsonvalue1 -flag2 jsonvalue2 --longflag3 jsonvalue3 ....
@@ -428,25 +426,31 @@ struct MCX_userio {
             while (i < argc) {
                 std::string arg(argv[i++]);
 
-                if (arg == "-f" || arg == "--input") {
+                if ((arg == "-f" || arg == "--input") && i < argc) {
                     loadfromfile(argv[i++]);
+                } else if (arg == "-h" || arg == "--help") {
+                    printhelp();
                 } else if (arg == "--bench") {
-                    benchmark(argv[i++]);
-                } else if (arg == "-j" || arg == "--json") {
+                    (i < argc) ? benchmark(argv[i++]) : printhelp();
+                } else if ((arg == "-j" || arg == "--json") && i < argc) {
                     cfg.update(json::parse(argv[i++]), true);
-                } else if (arg[0] == '-') {
+                } else if (arg[0] == '-' && i < argc) {
                     for ( const auto& opts : cmdflags ) {
                         if (opts.first.find(arg) != opts.first.end()) {
                             cfg[json::json_pointer(opts.second.first)] = opts.second.second == 's' ?  json::parse("\"" + std::string(argv[i++]) + "\"") :  json::parse(argv[i++]);
                             break;
                         }
                     }
+                } else {
+                    throw std::runtime_error(std::string("incomplete input parameter: ") + arg + "; every -flag/--flag must be followed by a valid value");
                 }
             }
-        } else if (params[0].find(".") == std::string::npos) { // format 2: umcx benchmarkname
-            benchmark(params[0]);
-        } else {                                            // format 3: umcx input.json
-            loadfromfile(params[0]);
+        } else {
+            if (argc == 2) {
+                (params[0].find(".") == std::string::npos) ? benchmark(params[0]) : loadfromfile(params[0]);
+            } else {
+                throw std::runtime_error("must use -flag or --flag to use than 1 input");
+            }
         }
 
         initdomain();
@@ -458,6 +462,11 @@ struct MCX_userio {
             savevolume(domain, 1.f, (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_vol.bnii" : "vol.bnii"));
             std::exit(0);
         }
+    }
+    void printhelp() {
+        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
+        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
+        std::exit(0);
     }
     void initdomain() {
         domain.reshape(cfg["Domain"]["Dim"][0], cfg["Domain"]["Dim"][1], cfg["Domain"]["Dim"][2]);
@@ -473,7 +482,6 @@ struct MCX_userio {
                 for (const auto& obj : cfg["Shapes"])
                     if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
                         #pragma omp parallel for collapse(2)
-
                         for (uint32_t z = 0; z < domain.size.z; z++)
                             for (uint32_t y = 0; y < domain.size.y; y++)
                                 for (uint32_t x = 0; x < domain.size.x; x++) {
@@ -489,6 +497,8 @@ struct MCX_userio {
                                         domain.mask((!std::isnan(label) ? label : 0), idx);
                                     }
                                 }
+                    } else if (!(obj.begin().key() == "Name" || obj.begin().key() == "Grid" || obj.begin().key() == "Origin")) {
+                        throw std::runtime_error(std::string("shape construct") + obj.begin().key() + " is not supported");
                     }
             } else {
                 domain.reshape(cfg["Shapes"]["_ArraySize_"][0], cfg["Shapes"]["_ArraySize_"][1], cfg["Shapes"]["_ArraySize_"][2]);
@@ -504,34 +514,27 @@ struct MCX_userio {
 
         for (const auto& det : detectors) {
             float radius = det["R"].get<float>();
+            float4 detpos = {det["Pos"][0].get<float>(), det["Pos"][1].get<float>(), det["Pos"][2].get<float>(), 0.f};
 
-            for (float z = -radius - 1.f; z <= radius + 1.f; z += 0.5f) { /*search in a cube with edge length 2*R+3*/
-                float iz = z + det["Pos"][2].get<float>();
-
-                for (float y = -radius - 1.f; y <= radius + 1.f; y += 0.5f) {
-                    float iy = y + det["Pos"][1].get<float>();
-
-                    for (float x = -radius - 1.f; x <= radius + 1.f; x += 0.5f) {
-                        float ix = x + det["Pos"][0].get<float>();
+            for (float iz = -radius - 1.f + detpos.z; iz <= radius + 1.f + detpos.z; iz += 0.5f) /*search in a cube with edge length 2*R+3*/
+                for (float iy = -radius - 1.f + detpos.y; iy <= radius + 1.f + detpos.y; iy += 0.5f)
+                    for (float ix = -radius - 1.f + detpos.x; ix <= radius + 1.f + detpos.x; ix += 0.5f) {
                         int idx1d = domain.index((short)ix, (short)iy, (short)iz);
 
-                        if (idx1d < 0 ||  x * x + y * y + z * z > (radius + 1.f) * (radius + 1.f) || (domain.get(idx1d) & MED_MASK) == 0) {
+                        if (idx1d < 0 ||  (ix - detpos.x) * (ix - detpos.x) + (iy - detpos.y) * (iy - detpos.y) + (iz - detpos.z) * (iz - detpos.z) > (radius + 1.f) * (radius + 1.f) || (domain.get(idx1d) & MED_MASK) == 0) {
                             continue;
                         }
 
                         if ((short)ix * (short)iy * (short)iz == 0 || (short)ix == (short)domain.size.x || (short)iy == (short)domain.size.y || (short)iz == (short)domain.size.z) { // if on bbx, mark as det
                             domain.mask(domain.get(idx1d) | DET_MASK, idx1d);
                         } else { // inner voxels, must have 1 neighbor is 0
-                            for (int i = 0; i < 26; i++) {
+                            for (int i = 0; i < 26; i++)
                                 if ((domain.get(idx1d + domain.index(neighbors[i][0], neighbors[i][1], neighbors[i][2])) & MED_MASK) == 0) {
                                     domain.mask((domain.get(idx1d) | DET_MASK), idx1d);
                                     break;
                                 }
-                            }
                         }
                     }
-                }
-            }
         }
     }
     void benchmark(std::string benchname) {
@@ -562,6 +565,8 @@ struct MCX_userio {
             cfg["Forward"]["Dt"] = 1e-10;
             cfg["Domain"]["Media"] = {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.002}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.005}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.37}}};
             cfg["Shapes"] = R"([{"Grid": {"Tag": 1, "Size": [60, 60, 60]}}, {"Sphere": {"O": [30, 30, 30], "R": 10, "Tag": 2}}])"_json;
+        } else if (bmid >= bm_unknown) {
+            throw std::runtime_error(std::string("benchmark ") + benchname + " is not found");
         }
     }
     void loadfromfile(std::string finput) {
@@ -672,7 +677,6 @@ int MCX_run_simulation(char* argv[], int argn = 1) {
     }
 
     MCX_clock timer;
-
     double energyescape = 0.0;
     const uint64_t nphoton = io.cfg["Session"]["Photons"].get<uint64_t>();
     int templateid = (gcfg.isreflect * 10 + gcfg.issavedet);
@@ -697,18 +701,17 @@ extern "C" int MCX_run_cmd(char* argv[], int argn) {
     return MCX_run_simulation(argv, argn);
 }
 extern "C" int MCX_run_json(char* jsoninput) {
-    char* cmdflags[] = {(char*)"--json", jsoninput};
-    return MCX_run_simulation(cmdflags, 2);
+    char* cmdflags[] = {(char*)"", (char*)"--json", jsoninput};
+    return MCX_run_simulation(cmdflags, sizeof(cmdflags) / sizeof(cmdflags[0]));
 }
 /////////////////////////////////////////////////
 /// \brief main function
 /////////////////////////////////////////////////
 int main(int argn, char* argv[]) {
-    if (argn == 1) {
-        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
-        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed []\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
-        return 0;
+    try {
+        return MCX_run_simulation(argv, argn);
+    } catch (const std::exception& err) {
+        std::cout << "umcx encounters an error:" << std::endl << err.what() << std::endl;
+        return 1;
     }
-
-    return MCX_run_simulation(argv, argn);
 }

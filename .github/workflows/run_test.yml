@@ -177,7 +177,7 @@ jobs:
           cd src
           make clean
           make nvidiaclang CXX=clang++-18 USERCXXFLAGS="--cuda-path=/usr/local/cuda" || true
-          echo 'LD_LIBRARY_PATH=/usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH' >> $GITHUB_ENV
+          echo 'LD_LIBRARY_PATH=/usr/lib/llvm-18/lib/:$LD_LIBRARY_PATH' >> $GITHUB_ENV
       - name: Run benchmarks for clang++-18
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |

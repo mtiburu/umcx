@@ -233,10 +233,8 @@ struct MCX_photon { // per thread
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
 
-        if (lastvoxelidx < 0) { // widefield source, launch position is outside of the domain bounding box
-            if (skip(invol) < 0.f) { // ray never intersect with the voxel domain bounding box
-                return;
-            }
+        if (lastvoxelidx < 0 && skip(invol) < 0.f) { // widefield source, launch position is outside of the domain bounding box
+            return; // ray never intersect with the voxel domain bounding box
         }
 
         mediaid = invol.get(lastvoxelidx);

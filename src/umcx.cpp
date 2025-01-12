@@ -614,7 +614,7 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
     MCX_photon p(pos, dir);
 #ifdef GPU_OFFLOAD
     const int totaldetphotondatalen = issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 1;
-    const int deviceid = JHAS(cfg["Session"], "DeviceID", int, 1) - 1, gridsize = JHAS(cfg["Session"], "ThreadNum", int, 10000) / JHAS(cfg["Session"], "BlockSize", int, 64);
+    const int deviceid = JHAS(cfg["Session"], "DeviceID", int, 1) - 1, gridsize = JHAS(cfg["Session"], "ThreadNum", int, 100000) / JHAS(cfg["Session"], "BlockSize", int, 64);
 #ifdef _LIBGOMP_OMP_LOCK_DEFINED
     const int blocksize = JHAS(cfg["Session"], "BlockSize", int, 64) / 32;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
 #else

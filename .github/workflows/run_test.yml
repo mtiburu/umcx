@@ -157,10 +157,16 @@ jobs:
           cd src
           make clean
           make nvidiaclang CXX=clang++-17 USERCXXFLAGS="--cuda-path=/usr/local/cuda" || true
-      - name: Run tests for clang++-17
+          echo 'LD_LIBRARY_PATH=/usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH' >> $GITHUB_ENV
+      - name: Run benchmarks for clang++-17
         run: |
           cd bin
-          LD_LIBRARY_PATH=/usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true
+          ./umcx cube60 || true
+          ./umcx cube60b || true
+      - name: Run tests for clang++-17
+        run: |
+          cd test
+          ./testumcx.sh || true
       - name: Installing clang-18
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
@@ -171,8 +177,15 @@ jobs:
           cd src
           make clean
           make nvidiaclang CXX=clang++-18 USERCXXFLAGS="--cuda-path=/usr/local/cuda" || true
-      - name: Run tests for clang++-18
+          echo 'LD_LIBRARY_PATH=/usr/lib/llvm-17/lib/:$LD_LIBRARY_PATH' >> $GITHUB_ENV
+      - name: Run benchmarks for clang++-18
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
           cd bin
-          LD_LIBRARY_PATH=/usr/lib/llvm-18/lib/:$LD_LIBRARY_PATH ./umcx cube60 || true
+          ./umcx cube60 || true
+          ./umcx cube60b || true
+      - name: Run tests for clang++-18
+        if: ${{ matrix.os == 'ubuntu-24.04' }}
+        run: |
+          cd test
+          ./testumcx.sh || true

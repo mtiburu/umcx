@@ -199,27 +199,27 @@ struct MCX_photon { // per thread
     short4 ipos /*{ix,iy,iz,flipdir}*/;
     int lastvoxelidx = -1, mediaid = 0;
 
-    MCX_photon(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { // constructor
+    MCX_photon(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { //< constructor
         launch(p0, v0, ran, gcfg);
     }
-    void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { // launch photon
+    void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { //< launch photon
         pos = p0;
         vec = v0;
 
-        if (gcfg.srctype == stIsotropic || gcfg.srctype == stCone) { // isotropic source or cone beam
+        if (gcfg.srctype == stIsotropic || gcfg.srctype == stCone) { //< isotropic source or cone beam
             rvec.x = (FLT_PI * 2.f) * ran.rand01();
             sincosf(rvec.x, &len.z, &len.w);
             rvec.x = (gcfg.srctype == stIsotropic) ? acosf(2.f * ran.rand01() - 1.f) : (len.x = cosf(gcfg.srcparam1.x), acosf(ran.rand01() * (1.0f - len.x) + len.x));    //sine distribution
             sincosf(rvec.x, &len.x, &len.y);
             rotatevector(len.x, len.y, len.z, len.w);
-        } else if (gcfg.srctype == stDisk) {                        // disk/top-hat source
+        } else if (gcfg.srctype == stDisk) {                        //< disk/top-hat source
             rvec.x = (FLT_PI * 2.f) * ran.rand01();
             sincosf(rvec.x, &len.z, &len.w);
             rvec.x = sqrtf(ran.rand01() * fabsf(gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
             len.x = 1.f - vec.z * vec.z;
             len.y = rvec.x / sqrtf(len.x);
             pos = float4(pos.x + len.y * (vec.x * vec.z * len.w - vec.y * len.z), pos.y + len.y * (vec.y * vec.z * len.w + vec.x * len.z), pos.z - len.y * len.x * len.w, pos.w);
-        } else if (gcfg.srctype == stPlanar) {                      // planar source
+        } else if (gcfg.srctype == stPlanar) {                      //< planar source
             len.x = ran.rand01();
             len.y = ran.rand01();
             pos = float4(pos.x + len.x * gcfg.srcparam1.x + len.y * gcfg.srcparam2.x, pos.y + len.x * gcfg.srcparam1.y + len.y * gcfg.srcparam2.y, pos.z + len.x * gcfg.srcparam1.z + len.y * gcfg.srcparam2.z, pos.w);
@@ -229,11 +229,11 @@ struct MCX_photon { // per thread
         len = float4(NAN, 0.f, 0.f, pos.w);
         ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
     }
-    template<const bool isreflect, const bool issavedet>              // main function to run a single photon from lunch to termination
+    template<const bool isreflect, const bool issavedet>    //< main function to run a single photon from lunch to termination
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
         lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
 
-        if (lastvoxelidx < 0 && skip(invol) < 0.f) { // widefield source, launch position is outside of the domain bounding box
+        if (lastvoxelidx < 0 && skip(invol) < 0.f) { //< widefield source, launch position is outside of the domain bounding box
             return; // ray never intersect with the voxel domain bounding box
         }
 
@@ -248,7 +248,7 @@ struct MCX_photon { // per thread
             savedetector(detpos, detdata, detphotonbuffer, gcfg);
         }
     }
-    template<const bool isreflect, const bool issavedet>              // run from one scattering site to the next, return 1 when terminate
+    template<const bool isreflect, const bool issavedet>   //< propagating photon from one scattering site to the next, return 1 when terminated
     int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, float detphotonbuffer[], const MCX_param& gcfg) {
         while (len.x > 0.f) {
             int newvoxelid = step(invol, props[(mediaid & MED_MASK)]);
@@ -283,7 +283,7 @@ struct MCX_photon { // per thread
 
         return 0;
     }
-    int step(MCX_volume<int>& invol, MCX_medium& prop) {
+    int step(MCX_volume<int>& invol, MCX_medium& prop) {   //< advancing photon one-step through a shape-representing discretized element (voxel)
         float htime[3];
 
         htime[0] = fabsf((ipos.x + (vec.x > 0.f) - pos.x) * rvec.x);  //< time-of-flight to hit the wall in each direction
@@ -311,7 +311,7 @@ struct MCX_photon { // per thread
 
         return lastvoxelidx;
     }
-    float skip(MCX_volume<int>& invol) {
+    float skip(MCX_volume<int>& invol) {       //< advancing photon that are launched outside of the domain to the 1st voxel in the path
         len.x = -pos.x * rvec.x;  //< time-of-flight to hit the x=y=z=0 walls
         len.y = -pos.y * rvec.y;
         len.z = -pos.z * rvec.z;
@@ -482,6 +482,16 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
                     (i < argc) ? benchmark(argv[i++]) : printhelp();
                 } else if ((arg == "-j" || arg == "--json") && i < argc) {
                     cfg.update(json::parse(argv[i++]), true);
+                } else if (arg == "-N" || arg == "--net") {
+                    cfg = json::parse(runcmd(std::string("curl -s -X GET ") + ((i == argc) ? std::string("https://neurojson.io:7777/mcx/_all_docs") : std::string("https://neurojson.io:7777/mcx/") + std::string(argv[i++]))));
+
+                    if (cfg.contains("rows")) {
+                        for (const auto& obj : cfg.value("rows", json::array())) {
+                            std::cout << (obj.value("id", "").find("_") > 0 ? obj.value("id", "") : "") << std::endl;
+                        }
+
+                        std::exit(0);
+                    }
                 } else if (arg[0] == '-' && i < argc) {
                     for ( const auto& opts : cmdflags ) {
                         if (opts.first.find(arg) != opts.first.end()) {
@@ -512,8 +522,10 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         }
     }
     void printhelp() {
-        std::cout << "Format: umcx -flag1 'jsonvalue1' -flag2 'jsonvalue2' ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n\nFlags:\n\t-f/--input\tinput json file\n\t-n/--photon\tphoton number\n\t-s/--session\toutput name\n\t--bench\t\tbenchmark name" << std::endl;
-        std::cout << "\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed [1648335518]\n\t-O/--outputtype\toutput type (x/f/e)\n\t-G/--gpuid\tdevice ID (1,2,...)\n\nAvailable benchmarks include: " << MCX_benchmarks.dump(8) << std::endl;
+        std::cout << "/uMCX/ - Portable, massively-parallel physical volumetric ray-tracer\nCopyright (c) 2024-2025 Qianqian Fang <q.fang@neu.edu>\thttps://mcx.space\n\nFormat:\n\tumcx -flag1 value1 -flag2 value2 ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n" << std::endl;
+        std::cout << "Flags:\n\t-f/--input\tinput json file\n\t--bench\t\tbenchmark name\n\t-n/--photon\tphoton number [1e6]\n\t-s/--session\toutput name\n\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed [1648335518]\n\t-O/--outputtype\t[x]: fluence-rate, f: fluence, e: energy" << std::endl;
+        std::cout << "\t-d/--savedet\tSave detected photons [1]\n\t-S/--save2pt\tSave volumetric output [1]\n\t-w/--savedetflag\t1:detector-id, 4:partial-path, 16:exit-pos, 32:exit-dir, add to combine [5]\n\t-U/--normalize\tnormalize output [1]" << std::endl;
+        std::cout << "\t-j/--json\tJSON string to overwrite settings\n\t-t/--thread\tmanual total threads\n\t-T/--blocksize\tmanual thread-block size [64]\n\t-G/--gpuid\tdevice ID [1]\n\t--dumpjson\tdump settings as json\n\t--dumpmask\tdump domain as binary json\n\t-h/--help\tprint help\n\t-N/--net\tbrowse or download simulations from NeuroJSON.io\n\nBuilt-in benchmarks: " << MCX_benchmarks.dump(8) << std::endl;
         std::exit(0);
     }
     void initdomain() {
@@ -659,12 +671,27 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         json::to_bjdata(bjdata, outputdata, true, true);
         outputdata.close();
     }
+    std::string runcmd(std::string cmd) {
+        std::array<char, 128> buffer;
+        std::string result;
+        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+
+        if (!pipe) {
+            throw std::runtime_error("unable to run curl to access online data at https://neurojson.io; please install curl first");
+        }
+
+        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+            result += buffer.data();
+        }
+
+        return result;
+    }
 };
 template<const bool isreflect, const bool issavedet>
 double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, MCX_volume<float>& outputvol, float4* detpos, MCX_medium* prop, MCX_detect& detdata) {
     double energyescape = 0.0;
     std::srand(!(cfg["Session"].contains("RNGSeed")) ? 1648335518 : (cfg["Session"]["RNGSeed"].get<int>() > 0 ? cfg["Session"]["RNGSeed"].get<int>() : std::time(0)));
-    const uint64_t nphoton = cfg["Session"]["Photons"].get<uint64_t>();
+    const uint64_t nphoton = cfg["Session"].value("Photons", 1000000);
     const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
     const float4 pos = {cfg["Optode"]["Source"]["Pos"][0].get<float>(), cfg["Optode"]["Source"]["Pos"][1].get<float>(), cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};
     const float4 dir = {cfg["Optode"]["Source"]["Dir"][0].get<float>(), cfg["Optode"]["Source"]["Dir"][1].get<float>(), cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};

@@ -514,7 +514,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         initdomain();
 
         if (std::find(params.begin(), params.end(), "--dumpjson") != params.end()) {
-            std::cout << cfg.dump(4) << std::endl;
+            std::cout << cfg.dump(2) << std::endl;
             std::exit(0);
         } else if (std::find(params.begin(), params.end(), "--dumpmask") != params.end()) {
             savevolume(domain, 1.f, (cfg["Session"].contains("ID") ? cfg["Session"]["ID"].get<std::string>() + "_vol.bnii" : "vol.bnii"));
@@ -600,7 +600,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
     }
     void benchmark(std::string benchname) {
         MCX_benchmarkid bmid = (MCX_benchmarkid)std::distance(MCX_benchmarks.begin(), std::find(MCX_benchmarks.begin(), MCX_benchmarks.end(), benchname));
-        cfg = {{"Session", {{"ID", "cube60"}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
+        cfg = {{"Session", {{"ID", benchname}, {"Photons", 1000000}}}, {"Forward", {{"T0", 0.0}, {"T1", 5e-9}, {"Dt", 5e-9}}},
             {"Domain", {{"Media", {{{"mua", 0.0}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.0}}, {{"mua", 0.005}, {"mus", 1.0}, {"g", 0.01}, {"n", 1.37}}, {{"mua", 0.002}, {"mus", 5.0}, {"g", 0.9}, {"n", 1.0}}}}, {"Dim", {60, 60, 60}}}},
             {"Optode", {{"Source", {{"Type", "pencil"}, {"Pos", {29.0, 29.0, 0.0}}, {"Dir", {0.0, 0.0, 1.0}}}}, {"Detector", {{{"Pos", {29, 19, 0}}, {"R", 1}}, {{"Pos", {29, 39, 0}}, {"R", 1}}, {{"Pos", {19, 29, 0}}, {"R", 1}}, {{"Pos", {39, 29, 0}}, {"R", 1}}}}}}
         };

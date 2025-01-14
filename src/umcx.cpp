@@ -41,7 +41,7 @@
     #define _PRAGMA_OMPACC_(settings)     _PRAGMA(acc settings)
     #define _PRAGMA_OMPACC_COPYIN(...)    _PRAGMA(acc data copyin(__VA_ARGS__))
     #define _PRAGMA_OMPACC_COPY(...)      _PRAGMA(acc data copy(__VA_ARGS__))
-    #define _PRAGMA_OMPACC_HOST_LOOP(settings)   _PRAGMA(omp parallel loop settings)
+    #define _PRAGMA_OMPACC_HOST_LOOP(settings)   _PRAGMA(acc parallel loop settings)
     #define _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, accignore, acconly, settings)   _PRAGMA(acc parallel loop gang num_gangs(gridsize) vector_length(blocksize) settings acconly)
 #endif
 

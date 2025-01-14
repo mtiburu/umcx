@@ -35,10 +35,14 @@
     #define _PRAGMA_OMPACC_(settings)     _PRAGMA(omp settings)
     #define _PRAGMA_OMPACC_COPYIN(...)    _PRAGMA(omp target data map(to: __VA_ARGS__))
     #define _PRAGMA_OMPACC_COPY(...)      _PRAGMA(omp target data map(tofrom: __VA_ARGS__))
+    #define _PRAGMA_OMPACC_HOST_LOOP(settings)   _PRAGMA(omp parallel for settings)
+    #define _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, deviceid, ompignore, settings)   _PRAGMA(omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) device(deviceid) settings)
 #else
     #define _PRAGMA_OMPACC_(settings)     _PRAGMA(acc settings)
     #define _PRAGMA_OMPACC_COPYIN(...)    _PRAGMA(acc data copyin(__VA_ARGS__))
     #define _PRAGMA_OMPACC_COPY(...)      _PRAGMA(acc data copy(__VA_ARGS__))
+    #define _PRAGMA_OMPACC_HOST_LOOP(settings)   _PRAGMA(omp parallel loop settings)
+    #define _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, accignore, acconly, settings)   _PRAGMA(acc parallel loop gang num_gangs(gridsize) vector_length(blocksize) settings acconly)
 #endif
 
 using json = nlohmann::ordered_json;
@@ -552,7 +556,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
                 for (const auto& obj : cfg["Shapes"])
                     if (shapeparser.find(obj.begin().key()) != shapeparser.end()) {
 #ifndef __NVCOMPILER
-                        #pragma omp parallel for collapse(2)
+                        _PRAGMA_OMPACC_HOST_LOOP(collapse(2))
 #endif
 
                         for (uint32_t z = 0; z < domain.size.z; z++)
@@ -723,17 +727,9 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
 #endif
     _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol) _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
     _PRAGMA_OMPACC_COPY(outputvol, detdata) _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
-#ifndef _OPENACC
-    #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) device(deviceid) reduction(+ : energyescape) firstprivate(ran, p)
-#else
-#pragma acc parallel loop gang num_gangs(gridsize) vector_length(blocksize) reduction(+ : energyescape) firstprivate(ran, p) firstprivate(detphotonbuffer[0:ppathlen])
-#endif
+    _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, deviceid, firstprivate(detphotonbuffer[0:ppathlen]), reduction(+ : energyescape) firstprivate(ran, p))
 #else  // GPU_OFFLOAD
-#ifdef _OPENACC
-#pragma acc parallel loop reduction(+ : energyescape) firstprivate(ran, p)
-#else
-    #pragma omp parallel for reduction(+ : energyescape) firstprivate(ran, p)
-#endif
+    _PRAGMA_OMPACC_HOST_LOOP(reduction(+ : energyescape) firstprivate(ran, p))
 #endif
 
     for (uint64_t i = 0; i < nphoton; i++) {

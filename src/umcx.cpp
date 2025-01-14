@@ -721,8 +721,8 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
 #else
     const int blocksize = cfg["Session"].value("BlockSize", 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
-    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol, inputvol.vol[0:inputvol.dimxyzt], prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum])
-    _PRAGMA_OMPACC_COPY(outputvol, detdata, outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
+    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol) _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
+    _PRAGMA_OMPACC_COPY(outputvol, detdata) _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
 #ifndef _OPENACC
     #pragma omp target teams distribute parallel for num_teams(gridsize) thread_limit(blocksize) device(deviceid) reduction(+ : energyescape) firstprivate(ran, p)
 #else

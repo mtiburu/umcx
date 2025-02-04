@@ -179,6 +179,43 @@ struct MCX_detect { // shared, read-only
         return (detectedphoton > maxdetphotons ? maxdetphotons : detectedphoton);
     }
 };
+
+struct LogLookupTable {
+    enum { TABLE_SIZE = 4096 };
+
+    float logTable[TABLE_SIZE];
+    float xMin;     // minimum x value, e.g., FLT_EPSILON
+    float xMax;     // maximum x value, e.g., 1.0f
+    float step;     // step = (xMax - xMin) / (TABLE_SIZE - 1)
+
+    LogLookupTable(float min_val, float max_val)
+        : xMin(min_val), xMax(max_val) {
+        step = (xMax - xMin) / (TABLE_SIZE - 1);
+
+        for (int i = 0; i < TABLE_SIZE; ++i) {
+            float x = xMin + i * step;
+            logTable[i] = logf(x);
+        }
+    }
+
+    // Returns log(x) via linear interpolation.
+    inline float lookup(float x) const {
+        if (x <= xMin) {
+            return logTable[0];
+        }
+
+        if (x >= xMax) {
+            return logTable[TABLE_SIZE - 1];
+        }
+
+        float pos = (x - xMin) / step;
+        int index = static_cast<int>(pos);
+        float frac = pos - index;
+        return logTable[index] * (1.0f - frac) + logTable[index + 1] * frac;
+    }
+};
+static const LogLookupTable globalLogTable(FLT_EPSILON, 1.0f);
+
 /// MCX_rand provides the xorshift128p random number generator
 struct MCX_rand { // per thread
     uint64_t t[2];
@@ -206,7 +243,7 @@ struct MCX_rand { // per thread
         return s1.f[0] - 1.0f;
     }
     float next_scat_len() {
-        return -logf(rand01() + FLT_EPSILON);
+        return -globalLogTable.lookup(rand01() + FLT_EPSILON);
     }
 };
 
@@ -251,6 +288,38 @@ struct TrigLookupTable {
 
 static const TrigLookupTable globalTrigTable;
 
+struct ExpLookupTable {
+    enum { TABLE_SIZE = 4096 };
+    float expTable[TABLE_SIZE];
+    float xMin;     // minimum x value (e.g., -10)
+    float xMax;     // maximum x value (e.g., 0)
+    float step;     // step = (xMax - xMin) / (TABLE_SIZE - 1)
+
+    ExpLookupTable(float min_val, float max_val)
+        : xMin(min_val), xMax(max_val)
+    {
+        step = (xMax - xMin) / (TABLE_SIZE - 1);
+        for (int i = 0; i < TABLE_SIZE; ++i) {
+            float x = xMin + i * step;
+            expTable[i] = expf(x);
+        }
+    }
+
+    // Returns exp(x) via linear interpolation.
+    inline float lookup(float x) const {
+        if (x <= xMin)
+            return expTable[0];
+        if (x >= xMax)
+            return expTable[TABLE_SIZE - 1];
+        float pos = (x - xMin) / step;
+        int index = static_cast<int>(pos);
+        float frac = pos - index;
+        return expTable[index] * (1.0f - frac) + expTable[index + 1] * frac;
+    }
+};
+
+static const ExpLookupTable globalExpTable(-10.0f, 0.0f);
+
 /// MCX_photon class performs MC simulation of a single photon
 struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,last_move*/, len /*{pscat,t,pathlen,p0}*/;
@@ -263,46 +332,65 @@ struct MCX_photon { // per thread
     void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) {
         pos = p0;
         vec = v0;
-        const float azimuth = 2.f * FLT_PI * ran.rand01();
 
         switch (gcfg.srctype) {
             case stIsotropic:
             case stCone: {
-                // isotropic source or cone beam
-                const float cosPolar = (gcfg.srctype == stIsotropic) ? 2.f * ran.rand01() - 1.f : cosf(gcfg.srcparam1.x) + ran.rand01() * (1.f - cos(gcfg.srcparam1.x));
-                const float sinPolar = sqrtf(1.f - cosPolar * cosPolar);
-                len = float4(sinPolar * cosf(azimuth), sinPolar * sinf(azimuth), cosPolar, 0.f);
+
+                rvec.x = (FLT_PI * 2.f) * ran.rand01();
+                sincosf(rvec.x, &len.z, &len.w);  // Compute sine and cosine of the azimuth angle.
+
+                float polar = 0.f;
+
+                if (gcfg.srctype == stIsotropic) {
+                    polar = acosf(2.f * ran.rand01() - 1.f);
+                } else { // stCone
+                    len.x = cosf(gcfg.srcparam1.x);
+                    polar = acosf(ran.rand01() * (1.0f - len.x) + len.x);
+                }
+
+                sincosf(polar, &len.x, &len.y);  // Compute sine and cosine of the polar angle.
                 rotatevector(len.x, len.y, len.z, len.w);
                 break;
             }
 
             case stDisk: {
-                // disk/top-hat source
-                const float radius = sqrtf(ran.rand01() * (gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
-                len = float4(cosf(azimuth) * radius, sinf(azimuth) * radius, 0.f, 0.f);
+                // Disk/top-hat source.
+                rvec.x = (FLT_PI * 2.f) * ran.rand01();
+                sincosf(rvec.x, &len.z, &len.w);
+                rvec.x = sqrtf(ran.rand01() * fabsf(gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
 
-                if (std::abs(vec.z) < 1.f - FLT_EPSILON) {
-                    const float lenY = len.x * vec.z * len.w - len.y * vec.y;
-                    const float lenX = len.x * vec.y * len.w + len.y * vec.x;
-                    pos = float4(pos.x + lenX, pos.y + lenY, pos.z - len.z * len.w, pos.w);
+                if (vec.z > -1.f + FLT_EPSILON && vec.z < 1.f - FLT_EPSILON) {
+                    len.x = 1.f - vec.z * vec.z;
+                    len.y = rvec.x / sqrtf(len.x);
+                    pos = float4(
+                              pos.x + len.y * (vec.x * vec.z * len.w - vec.y * len.z),
+                              pos.y + len.y * (vec.y * vec.z * len.w + vec.x * len.z),
+                              pos.z - len.y * len.x * len.w,
+                              pos.w
+                          );
                 } else {
-                    pos.x += len.x;
-                    pos.y += len.y;
+                    pos.x += rvec.x * len.w;
+                    pos.y += rvec.x * len.z;
                 }
 
                 break;
             }
 
             case stPlanar: {
-                // planar source
-                const float x = ran.rand01();
-                const float y = ran.rand01();
+                // Planar source.
+                len.x = ran.rand01();
+                len.y = ran.rand01();
                 pos = float4(
-                          pos.x + x * gcfg.srcparam1.x + y * gcfg.srcparam2.x,
-                          pos.y + x * gcfg.srcparam1.y + y * gcfg.srcparam2.y,
-                          pos.z + x * gcfg.srcparam1.z + y * gcfg.srcparam2.z,
+                          pos.x + len.x * gcfg.srcparam1.x + len.y * gcfg.srcparam2.x,
+                          pos.y + len.x * gcfg.srcparam1.y + len.y * gcfg.srcparam2.y,
+                          pos.z + len.x * gcfg.srcparam1.z + len.y * gcfg.srcparam2.z,
                           pos.w
                       );
+                break;
+            }
+
+            default: {
                 break;
             }
         }
@@ -311,6 +399,7 @@ struct MCX_photon { // per thread
         len = float4(NAN, 0.f, 0.f, pos.w);
         ipos = short4((short)pos.x, (short)pos.y, (short)pos.z, -1);
     }
+
     template<const bool isreflect, const bool issavedet>
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
         // Initialize last voxel index
@@ -398,7 +487,7 @@ struct MCX_photon { // per thread
         htime[1] = (htime[0] != len.x); // is continue next voxel?
         rvec.w = (prop.mus == 0.f) ? rvec.w : (htime[0] / prop.mus);
 
-        float attenuation = expf(-prop.mua * rvec.w);
+        float attenuation = globalExpTable.lookup(-prop.mua * rvec.w);
         pos = float4(pos.x + rvec.w * vec.x, pos.y + rvec.w * vec.y, pos.z + rvec.w * vec.z, pos.w * attenuation);
 
         len.x -= htime[0];
@@ -795,13 +884,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
 };
 #include <mpi.h>
 template<const bool isreflect, const bool issavedet>
-double MCX_kernel(json& cfg,
-                  const MCX_param& gcfg,
-                  MCX_volume<int>& inputvol,
-                  MCX_volume<float>& outputvol,
-                  float4* detpos,
-                  MCX_medium* prop,
-                  MCX_detect& detdata) {
+double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, MCX_volume<float>& outputvol, float4* detpos, MCX_medium* prop, MCX_detect& detdata) {
     double energyescape_local = 0.0, energyescape_global = 0.0;
 
 #ifdef MPI_ENABLED
@@ -857,7 +940,7 @@ double MCX_kernel(json& cfg,
         float* detphotonbuffer = new float[detdata.ppathlen]();
 
         // Use static scheduling to reduce overhead.
-        #pragma omp for reduction(+: energyescape_local) schedule(static) nowait
+        #pragma omp for reduction(+: energyescape_local) schedule(dynamic, 128) nowait
 
         for (uint64_t i = start_photon; i < end_photon; i++) {
             // Reseed per iteration based on photon index.

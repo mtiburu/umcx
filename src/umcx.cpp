@@ -23,9 +23,6 @@
 #include <mpi.h>
 #include "nlohmann/json.hpp"
 
-extern "C" {
-#include <sleef.h>
-}
 #define ONE_OVER_C0          3.335640951981520e-12f
 #define FLT_PI               3.1415926535897932385f
 #define REFLECT_PHOTON(dir)  (vec.dir = -vec.dir, rvec.dir = -rvec.dir, pos.dir = nextafterf((int)(pos.dir + 0.5f), (vec.dir > 0.f) - (vec.dir < 0.f)), ipos.dir = (short)(pos.dir))
@@ -401,15 +398,7 @@ struct MCX_photon { // per thread
         htime[1] = (htime[0] != len.x); // is continue next voxel?
         rvec.w = (prop.mus == 0.f) ? rvec.w : (htime[0] / prop.mus);
 
-#ifdef __AVX512F__
-        float attenuation = Sleef_expf16_u10(-prop.mua * rvec.w);
-#elif defined(__AVX2__)
-        float attenuation = Sleef_expf8_u10(-prop.mua * rvec.w);
-#elif defined(__AVX__)
-        float attenuation = Sleef_expf4_u10(-prop.mua * rvec.w);
-#else
-        float attenuation = expf(-prop.mua * rvec.w); // Default fallback
-#endif
+        float attenuation = expf(-prop.mua * rvec.w);
         pos = float4(pos.x + rvec.w * vec.x, pos.y + rvec.w * vec.y, pos.z + rvec.w * vec.z, pos.w * attenuation);
 
         len.x -= htime[0];
@@ -451,33 +440,6 @@ struct MCX_photon { // per thread
         len.w = pos.w;
         len.z = 0.f;
     }
-    /*
-    void scatter(MCX_medium& prop, MCX_rand& ran) {
-        float tmp0;
-        len.x = ran.next_scat_len();
-
-        tmp0 = (2.f * FLT_PI) * ran.rand01(); //next arimuth angle
-        sincosf(tmp0, &rvec.z, &rvec.w);
-
-        if (fabsf(prop.g) > FLT_EPSILON) { //< if prop.g is too small, the distribution of theta is bad
-            tmp0 = (1.f - prop.g * prop.g) / (1.f - prop.g + 2.f * prop.g * ran.rand01());
-            tmp0 *= tmp0;
-            tmp0 = (1.f + prop.g * prop.g - tmp0) / (2.f * prop.g);
-            tmp0 = fmaxf(-1.f, fminf(1.f, tmp0));
-
-            rvec.x = acosf(tmp0);
-            rvec.x = sinf(rvec.x);
-            rvec.y = tmp0;
-        } else {
-            tmp0 = acosf(2.f * ran.rand01() - 1.f);
-            sincosf(tmp0, &rvec.x, &rvec.y);
-        }
-
-        rotatevector(rvec.x, rvec.y, rvec.z, rvec.w);
-        rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, rvec.w);
-        vec.w++; // stops at 16777216 due to finite precision
-    }
-    */
     void scatter(MCX_medium& prop, MCX_rand& ran) {
         float tmp0;
         len.x = ran.next_scat_len();
@@ -568,8 +530,6 @@ struct MCX_photon { // per thread
         }
     }
     void sincosf(float ang, float* sine, float* cosine) {
-        //*sine = sinf(ang);
-        //*cosine = cosf(ang);
         globalTrigTable.lookup(ang, *sine, *cosine);
     }
 };
@@ -833,66 +793,6 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         return result;
     }
 };
-/*
-template<const bool isreflect, const bool issavedet>
-double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, MCX_volume<float>& outputvol, float4* detpos, MCX_medium* prop, MCX_detect& detdata) {
-    double energyescape = 0.0;
-    const uint64_t nphoton = cfg["Session"].value("Photons", 1000000);
-    const int num_threads = omp_get_max_threads();  // Get available CPU threads
-
-    std::srand(!(cfg["Session"].contains("RNGSeed")) ? 1648335518 : (cfg["Session"]["RNGSeed"].get<int>() > 0 ? cfg["Session"]["RNGSeed"].get<int>() : std::time(0)));
-    const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};
-    const float4 pos = {cfg["Optode"]["Source"]["Pos"][0].get<float>(), cfg["Optode"]["Source"]["Pos"][1].get<float>(), cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};
-    const float4 dir = {cfg["Optode"]["Source"]["Dir"][0].get<float>(), cfg["Optode"]["Source"]["Dir"][1].get<float>(), cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};
-
-    MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
-    MCX_photon p(pos, dir, ran, gcfg);
-
-#ifdef _OPENACC
-    int ppathlen = detdata.ppathlen;
-    float* detphotonbuffer = (float*)calloc(sizeof(float), detdata.ppathlen);
-#endif
-
-#ifdef GPU_OFFLOAD
-    const int totaldetphotondatalen = issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 1;
-    const int deviceid = cfg["Session"].value("DeviceID", 1) - 1, gridsize = cfg["Session"].value("ThreadNum", 100000) / cfg["Session"].value("BlockSize", 64);
-#ifdef _LIBGOMP_OMP_LOCK_DEFINED
-    const int blocksize = cfg["Session"].value("BlockSize", 64) / 32;  // gcc nvptx offloading uses {32,teams_thread_limit,1} as blockdim
-#else
-    const int blocksize = cfg["Session"].value("BlockSize", 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
-#endif
-    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol)
-    _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
-    _PRAGMA_OMPACC_COPY(outputvol, detdata)
-    _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
-    _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, deviceid, firstprivate(detphotonbuffer[0:ppathlen]), reduction(+ : energyescape) firstprivate(ran, p))
-
-#else
-
-    #pragma omp parallel num_threads(num_threads)
-    {
-        MCX_rand ran_private(seeds.x, seeds.y, seeds.z, seeds.w);
-        MCX_photon p_private(pos, dir, ran_private, gcfg);
-        float detphotonbuffer[10] = {}; // Per-thread storage to avoid false sharing
-
-        #pragma omp for reduction(+:energyescape) schedule(static)
-
-        for (uint64_t i = 0; i < nphoton; i++) {
-            ran_private.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
-            p_private.launch(pos, dir, ran_private, gcfg);
-            p_private.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran_private, gcfg);
-            energyescape += p_private.pos.w;
-        }
-    }
-
-#endif
-
-#ifdef _OPENACC
-    free(detphotonbuffer);
-#endif
-    return energyescape;
-}
-*/
 #include <mpi.h>
 template<const bool isreflect, const bool issavedet>
 double MCX_kernel(json& cfg,
@@ -919,17 +819,9 @@ double MCX_kernel(json& cfg,
     const uint64_t end_photon = cfg["Session"].value("Photons", 1000000);
 #endif
 
-    const dim4 seeds = { (uint32_t)std::rand(), (uint32_t)std::rand(),
-                         (uint32_t)std::rand(), (uint32_t)std::rand()
-                       };
-    const float4 pos = { cfg["Optode"]["Source"]["Pos"][0].get<float>(),
-                         cfg["Optode"]["Source"]["Pos"][1].get<float>(),
-                         cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f
-                       };
-    const float4 dir = { cfg["Optode"]["Source"]["Dir"][0].get<float>(),
-                         cfg["Optode"]["Source"]["Dir"][1].get<float>(),
-                         cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f
-                       };
+    const dim4 seeds = { (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand() };
+    const float4 pos = { cfg["Optode"]["Source"]["Pos"][0].get<float>(), cfg["Optode"]["Source"]["Pos"][1].get<float>(), cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f };
+    const float4 dir = { cfg["Optode"]["Source"]["Dir"][0].get<float>(), cfg["Optode"]["Source"]["Dir"][1].get<float>(), cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f };
 
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir, ran, gcfg);
@@ -965,14 +857,13 @@ double MCX_kernel(json& cfg,
         float* detphotonbuffer = new float[detdata.ppathlen]();
 
         // Use static scheduling to reduce overhead.
-        #pragma omp for reduction(+: energyescape_local) schedule(static)
+        #pragma omp for reduction(+: energyescape_local) schedule(static) nowait
 
         for (uint64_t i = start_photon; i < end_photon; i++) {
             // Reseed per iteration based on photon index.
             ran_private.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
             p_private.launch(pos, dir, ran_private, gcfg);
-            p_private.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos,
-                                                detdata, detphotonbuffer, ran_private, gcfg);
+            p_private.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran_private, gcfg);
             energyescape_local += p_private.pos.w;
         }
 
@@ -993,7 +884,6 @@ double MCX_kernel(json& cfg,
 
     return energyescape_global;
 }
-
 
 /// Main MCX simulation function, parsing user inputs via string arrays in argv[argn], can be called repeatedly
 int MCX_run_simulation(char* argv[], int argn = 1) {

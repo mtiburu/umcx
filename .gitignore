@@ -1,0 +1,10 @@
+# Ignore compiled object files
+src/*.o
+*.out
+*.a
+*.so
+
+# Ignore specific test files
+test/*.bnii
+test/*.jdb
+

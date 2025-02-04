@@ -7,10 +7,6 @@ CXX ?= clang++
 
 CXXFLAGS += -g -Wall -Wextra -pedantic -std=c++11 -O3 -ffast-math -funroll-loops 
 
-CXXFLAGS += -I${HOME}/sleef/include/ 
-LDFLAGS += -L${HOME}/sleef/lib64 
-
-
 BINARY = umcx
 SRC = umcx.cpp
 OBJS = $(SRC:.cpp=.o)

@@ -19,8 +19,13 @@
 #include <chrono>
 #include <set>
 #include <map>
+#include <omp.h>
+#include <mpi.h>
 #include "nlohmann/json.hpp"
 
+extern "C" {
+#include <sleef.h>
+}
 #define ONE_OVER_C0          3.335640951981520e-12f
 #define FLT_PI               3.1415926535897932385f
 #define REFLECT_PHOTON(dir)  (vec.dir = -vec.dir, rvec.dir = -rvec.dir, pos.dir = nextafterf((int)(pos.dir + 0.5f), (vec.dir > 0.f) - (vec.dir < 0.f)), ipos.dir = (short)(pos.dir))
@@ -107,7 +112,7 @@ struct MCX_volume { // shared, read-only
     void reshape(uint32_t Nx, uint32_t Ny, uint32_t Nz, uint32_t Nt = 1, T value = 0.0f) {
         size = dim4(Nx, Ny, Nz, Nt);
         dimxy = Nx * Ny;
-        dimxyz = dimxy * Ny;
+        dimxyz = dimxy * Nz;
         dimxyzt = dimxyz * Nt;
         delete [] vol;
         vol = new T[dimxyzt] {};
@@ -207,6 +212,48 @@ struct MCX_rand { // per thread
         return -logf(rand01() + FLT_EPSILON);
     }
 };
+
+struct TrigLookupTable {
+
+    enum { TABLE_SIZE = 4096 };
+    float sinTable[TABLE_SIZE];
+    float cosTable[TABLE_SIZE];
+    float step;  // angular step = 2π / TABLE_SIZE
+
+    // Constructor precomputes sine and cosine values
+    TrigLookupTable() : step(2.0f * FLT_PI / TABLE_SIZE) {
+        for (int i = 0; i < TABLE_SIZE; ++i) {
+            float angle = i * step;
+            sinTable[i] = sinf(angle);
+            cosTable[i] = cosf(angle);
+        }
+    }
+
+    // Lookup function with linear interpolation.
+    // The angle is wrapped to [0, 2π), then used to interpolate between the
+    // precomputed table entries for sine and cosine.
+    inline void lookup(float angle, float& sinVal, float& cosVal) const {
+
+        angle = fmodf(angle, 2.0f * FLT_PI); // Normalize angle to [0, 2π)
+
+        if (angle < 0) {
+            angle += 2.0f * FLT_PI;
+        }
+
+        // Determine the fractional index in the table
+        float pos = angle / step;
+        int index0 = static_cast<int>(pos);
+        float alpha = pos - index0;
+        int index1 = (index0 + 1) % TABLE_SIZE; // wrap-around if needed
+
+        // Linearly interpolate between table entries
+        sinVal = sinTable[index0] * (1.0f - alpha) + sinTable[index1] * alpha;
+        cosVal = cosTable[index0] * (1.0f - alpha) + cosTable[index1] * alpha;
+    }
+};
+
+static const TrigLookupTable globalTrigTable;
+
 /// MCX_photon class performs MC simulation of a single photon
 struct MCX_photon { // per thread
     float4 pos /*{x,y,z,w}*/, vec /*{vx,vy,vz,nscat}*/, rvec /*1/vx,1/vy,1/vz,last_move*/, len /*{pscat,t,pathlen,p0}*/;
@@ -216,81 +263,124 @@ struct MCX_photon { // per thread
     MCX_photon(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { //< constructor
         launch(p0, v0, ran, gcfg);
     }
-    void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) { //< launch photon
+    void launch(const float4& p0, const float4& v0, MCX_rand& ran, const MCX_param& gcfg) {
         pos = p0;
         vec = v0;
+        const float azimuth = 2.f * FLT_PI * ran.rand01();
 
-        if (gcfg.srctype == stIsotropic || gcfg.srctype == stCone) { //< isotropic source or cone beam
-            rvec.x = (FLT_PI * 2.f) * ran.rand01();
-            sincosf(rvec.x, &len.z, &len.w);
-            rvec.x = (gcfg.srctype == stIsotropic) ? acosf(2.f * ran.rand01() - 1.f) : (len.x = cosf(gcfg.srcparam1.x), acosf(ran.rand01() * (1.0f - len.x) + len.x));    //sine distribution
-            sincosf(rvec.x, &len.x, &len.y);
-            rotatevector(len.x, len.y, len.z, len.w);
-        } else if (gcfg.srctype == stDisk) {                        //< disk/top-hat source
-            rvec.x = (FLT_PI * 2.f) * ran.rand01();
-            sincosf(rvec.x, &len.z, &len.w);
-            rvec.x = sqrtf(ran.rand01() * fabsf(gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
-            len.x = 1.f - vec.z * vec.z;
-            len.y = rvec.x / sqrtf(len.x);
-            pos = float4(pos.x + len.y * (vec.x * vec.z * len.w - vec.y * len.z), pos.y + len.y * (vec.y * vec.z * len.w + vec.x * len.z), pos.z - len.y * len.x * len.w, pos.w);
-        } else if (gcfg.srctype == stPlanar) {                      //< planar source
-            len.x = ran.rand01();
-            len.y = ran.rand01();
-            pos = float4(pos.x + len.x * gcfg.srcparam1.x + len.y * gcfg.srcparam2.x, pos.y + len.x * gcfg.srcparam1.y + len.y * gcfg.srcparam2.y, pos.z + len.x * gcfg.srcparam1.z + len.y * gcfg.srcparam2.z, pos.w);
+        switch (gcfg.srctype) {
+            case stIsotropic:
+            case stCone: {
+                // isotropic source or cone beam
+                const float cosPolar = (gcfg.srctype == stIsotropic) ? 2.f * ran.rand01() - 1.f : cosf(gcfg.srcparam1.x) + ran.rand01() * (1.f - cos(gcfg.srcparam1.x));
+                const float sinPolar = sqrtf(1.f - cosPolar * cosPolar);
+                len = float4(sinPolar * cosf(azimuth), sinPolar * sinf(azimuth), cosPolar, 0.f);
+                rotatevector(len.x, len.y, len.z, len.w);
+                break;
+            }
+
+            case stDisk: {
+                // disk/top-hat source
+                const float radius = sqrtf(ran.rand01() * (gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y) + gcfg.srcparam1.y * gcfg.srcparam1.y);
+                len = float4(cosf(azimuth) * radius, sinf(azimuth) * radius, 0.f, 0.f);
+
+                if (std::abs(vec.z) < 1.f - FLT_EPSILON) {
+                    const float lenY = len.x * vec.z * len.w - len.y * vec.y;
+                    const float lenX = len.x * vec.y * len.w + len.y * vec.x;
+                    pos = float4(pos.x + lenX, pos.y + lenY, pos.z - len.z * len.w, pos.w);
+                } else {
+                    pos.x += len.x;
+                    pos.y += len.y;
+                }
+
+                break;
+            }
+
+            case stPlanar: {
+                // planar source
+                const float x = ran.rand01();
+                const float y = ran.rand01();
+                pos = float4(
+                          pos.x + x * gcfg.srcparam1.x + y * gcfg.srcparam2.x,
+                          pos.y + x * gcfg.srcparam1.y + y * gcfg.srcparam2.y,
+                          pos.z + x * gcfg.srcparam1.z + y * gcfg.srcparam2.z,
+                          pos.w
+                      );
+                break;
+            }
         }
 
         rvec = float4(1.f / v0.x, 1.f / v0.y, 1.f / v0.z, 0.f);
         len = float4(NAN, 0.f, 0.f, pos.w);
-        ipos = short4((short)p0.x, (short)p0.y, (short)p0.z, -1);
+        ipos = short4((short)pos.x, (short)pos.y, (short)pos.z, -1);
     }
-    template<const bool isreflect, const bool issavedet>    //< main function to run a single photon from lunch to termination
+    template<const bool isreflect, const bool issavedet>
     void run(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], const float4 detpos[], MCX_detect& detdata, float detphotonbuffer[], MCX_rand& ran, const MCX_param& gcfg) {
-        lastvoxelidx = outvol.index(ipos.x, ipos.y, ipos.z, 0);
+        // Initialize last voxel index
+        lastvoxelidx = invol.index(ipos.x, ipos.y, ipos.z, 0);
 
-        if (lastvoxelidx < 0 && skip(invol) < 0.f) { //< widefield source, launch position is outside of the domain bounding box
-            return; // ray never intersect with the voxel domain bounding box
+        if (lastvoxelidx < 0 && skip(invol) < 0.f) {
+            return;
         }
 
         mediaid = invol.get(lastvoxelidx);
+
         len.x = ran.next_scat_len();
 
-        while (sprint<isreflect, issavedet>(invol, outvol, props, ran, detphotonbuffer, gcfg) == 0) {
-            scatter(props[(mediaid & MED_MASK)], ran);
+        while (true) {
+            if (sprint<isreflect, issavedet>(invol, outvol, props, ran, detphotonbuffer, gcfg) != 0) {
+                break;
+            }
+
+            scatter(props[mediaid & MED_MASK], ran);
         }
 
-        if (issavedet && (mediaid & DET_MASK) && len.y <= gcfg.tend) {
-            savedetector(detpos, detdata, detphotonbuffer, gcfg);
+        if (issavedet) { // Compile-time check for issavedet
+            if ((mediaid & DET_MASK) && len.y <= gcfg.tend) {
+                savedetector(detpos, detdata, detphotonbuffer, gcfg);
+            }
         }
     }
-    template<const bool isreflect, const bool issavedet>   //< propagating photon from one scattering site to the next, return 1 when terminated
+
+    template<const bool isreflect, const bool issavedet>
     int sprint(MCX_volume<int>& invol, MCX_volume<float>& outvol, MCX_medium props[], MCX_rand& ran, float detphotonbuffer[], const MCX_param& gcfg) {
         while (len.x > 0.f) {
-            int newvoxelid = step(invol, props[(mediaid & MED_MASK)]);
+            int newvoxelid = step(invol, props[mediaid & MED_MASK]);
 
-            if (newvoxelid != lastvoxelidx) {   // only save when moving out of a voxel
-                if (issavedet && (gcfg.savedetflag & dpPPath) && ((mediaid & MED_MASK) > 0)) {
-                    detphotonbuffer[(mediaid & MED_MASK) - 1] += len.z;
-                }
-
-                if (gcfg.issavevol) {
-                    save(outvol, fminf(gcfg.maxgate - 1, (int)(floorf((len.y - gcfg.tstart) * gcfg.rtstep))), props[(mediaid & MED_MASK)].mua, gcfg);
-                }
-
-                if (len.y > gcfg.tend) {
-                    return 1;    // terminating photon due to exceeding maximum time gate
-                }
-
-                int newmediaid = ((newvoxelid >= 0) ? invol.get(newvoxelid) : 0);
-
-                if (isreflect && gcfg.isreflect && props[(mediaid & MED_MASK)].n != props[(newmediaid & MED_MASK)].n) {
-                    if (reflect(props[((mediaid & MED_MASK))].n, props[(newmediaid & MED_MASK)].n, ran, newvoxelid, newmediaid) && (newvoxelid < 0 || (newmediaid & MED_MASK) == 0)) {
-                        return 1;    // terminating photon due to transmitting to background at boundary
+            if (newvoxelid != lastvoxelidx) {// Only act when moving out of the current voxel
+                if (issavedet) {// Save photon path length if conditions are met
+                    if ((gcfg.savedetflag & dpPPath) && (mediaid & MED_MASK) > 0) {
+                        detphotonbuffer[(mediaid & MED_MASK) - 1] += len.z;
                     }
-                } else if (newvoxelid < 0 || (newmediaid & MED_MASK) == 0) {
-                    return 1;                   // terminating photon due to continue moving to 0-valued voxel or out of domain
                 }
 
-                lastvoxelidx = newvoxelid;      // save last saving site
+                if (gcfg.issavevol) {// Save volume data if required
+                    int gateIndex = static_cast<int>(std::floor((len.y - gcfg.tstart) * gcfg.rtstep));
+                    gateIndex = std::max(0, std::min(gateIndex, gcfg.maxgate - 1));
+                    save(outvol, gateIndex, props[mediaid & MED_MASK].mua, gcfg);
+                }
+
+                if (len.y > gcfg.tend) {// Terminate photon if time exceeds maximum gate
+                    return 1;
+                }
+
+                int newmediaid = (newvoxelid >= 0) ? invol.get(newvoxelid) : 0;// Determine new medium ID
+
+                if (isreflect) {// Handle reflection at medium boundaries
+                    if (gcfg.isreflect && props[mediaid & MED_MASK].n != props[newmediaid & MED_MASK].n) {
+                        bool isReflected = reflect(props[mediaid & MED_MASK].n, props[newmediaid & MED_MASK].n, ran, newvoxelid, newmediaid);
+
+                        if (isReflected && (newvoxelid < 0 || (newmediaid & MED_MASK) == 0)) {
+                            return 1; // Terminate due to transmission to background
+                        }
+                    }
+                }
+
+                if (newvoxelid < 0 || (newmediaid & MED_MASK) == 0) {// Terminate if moving out of bounds or into a 0-valued voxel
+                    return 1;
+                }
+
+                lastvoxelidx = newvoxelid;
                 mediaid = newmediaid;
             }
         }
@@ -310,7 +400,17 @@ struct MCX_photon { // per thread
         htime[0] = fminf(htime[0], len.x);
         htime[1] = (htime[0] != len.x); // is continue next voxel?
         rvec.w = (prop.mus == 0.f) ? rvec.w : (htime[0] / prop.mus);
-        pos = float4(pos.x + rvec.w * vec.x, pos.y + rvec.w * vec.y, pos.z + rvec.w * vec.z, pos.w * expf(-prop.mua * rvec.w));
+
+#ifdef __AVX512F__
+        float attenuation = Sleef_expf16_u10(-prop.mua * rvec.w);
+#elif defined(__AVX2__)
+        float attenuation = Sleef_expf8_u10(-prop.mua * rvec.w);
+#elif defined(__AVX__)
+        float attenuation = Sleef_expf4_u10(-prop.mua * rvec.w);
+#else
+        float attenuation = expf(-prop.mua * rvec.w); // Default fallback
+#endif
+        pos = float4(pos.x + rvec.w * vec.x, pos.y + rvec.w * vec.y, pos.z + rvec.w * vec.z, pos.w * attenuation);
 
         len.x -= htime[0];
         len.y += rvec.w * prop.n * ONE_OVER_C0;
@@ -351,6 +451,7 @@ struct MCX_photon { // per thread
         len.w = pos.w;
         len.z = 0.f;
     }
+    /*
     void scatter(MCX_medium& prop, MCX_rand& ran) {
         float tmp0;
         len.x = ran.next_scat_len();
@@ -376,6 +477,33 @@ struct MCX_photon { // per thread
         rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, rvec.w);
         vec.w++; // stops at 16777216 due to finite precision
     }
+    */
+    void scatter(MCX_medium& prop, MCX_rand& ran) {
+        float tmp0;
+        len.x = ran.next_scat_len();
+
+        tmp0 = (2.f * FLT_PI) * ran.rand01(); // next azimuth angle
+        sincosf(tmp0, &rvec.z, &rvec.w);
+
+        if (fabsf(prop.g) > FLT_EPSILON) {  // anisotropic scattering branch
+            tmp0 = (1.f - prop.g * prop.g) / (1.f - prop.g + 2.f * prop.g * ran.rand01());
+            tmp0 *= tmp0;
+            tmp0 = (1.f + prop.g * prop.g - tmp0) / (2.f * prop.g);
+            tmp0 = fmaxf(-1.f, fminf(1.f, tmp0)); // clamp to [-1,1]
+
+            rvec.y = tmp0;                     // cosine theta
+            rvec.x = sqrtf(1.f - tmp0 * tmp0);   // sine theta, using identity sin(acos(tmp0)) = sqrt(1-tmp0^2)
+        } else {  // isotropic scattering branch
+            float x = 2.f * ran.rand01() - 1.f;  // sample cosine theta uniformly from [-1, 1]
+            rvec.y = x;                        // cosine theta
+            rvec.x = sqrtf(1.f - x * x);         // sine theta
+        }
+
+        rotatevector(rvec.x, rvec.y, rvec.z, rvec.w);
+        rvec = float4(1.f / vec.x, 1.f / vec.y, 1.f / vec.z, rvec.w);
+        vec.w++; // stops at 16777216 due to finite precision
+    }
+
     float reflectcoeff(float n1, float n2) {
         float Icos = fabsf((ipos.w == 0) ? vec.x : (ipos.w == 1 ? vec.y : vec.z));
         float tmp0 = n1 * n1;
@@ -440,8 +568,9 @@ struct MCX_photon { // per thread
         }
     }
     void sincosf(float ang, float* sine, float* cosine) {
-        *sine = sinf(ang);
-        *cosine = cosf(ang);
+        //*sine = sinf(ang);
+        //*cosine = cosf(ang);
+        globalTrigTable.lookup(ang, *sine, *cosine);
     }
 };
 #pragma omp end declare target
@@ -492,7 +621,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
                     loadfromfile(argv[i++]);
                 } else if (arg == "-h" || arg == "--help") {
                     printhelp();
-                } else if (arg == "--bench") {
+                } else if (arg == "-Q" || arg == "--bench") {
                     (i < argc) ? benchmark(argv[i++]) : printhelp();
                 } else if ((arg == "-j" || arg == "--json") && i < argc) {
                     cfg.update(json::parse(argv[i++]), true);
@@ -537,7 +666,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
     }
     void printhelp() {
         std::cout << "/uMCX/ - Portable, massively-parallel physical volumetric ray-tracer\nCopyright (c) 2024-2025 Qianqian Fang <q.fang@neu.edu>\thttps://mcx.space\n\nFormat:\n\tumcx -flag1 value1 -flag2 value2 ...\n\t\tor\n\tumcx inputjson.json\n\tumcx benchmarkname\n" << std::endl;
-        std::cout << "Flags:\n\t-f/--input\tinput json file\n\t--bench\t\tbenchmark name\n\t-n/--photon\tphoton number [1e6]\n\t-s/--session\toutput name\n\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed [1648335518]\n\t-O/--outputtype\t[x]: fluence-rate, f: fluence, e: energy" << std::endl;
+        std::cout << "Flags:\n\t-f/--input\tinput json file\n\t-Q/--bench\t\tbenchmark name\n\t-n/--photon\tphoton number [1e6]\n\t-s/--session\toutput name\n\t-u/--unitinmm\tvoxel size in mm [1]\n\t-E/--seed\tRNG seed [1648335518]\n\t-O/--outputtype\t[x]: fluence-rate, f: fluence, e: energy" << std::endl;
         std::cout << "\t-d/--savedet\tSave detected photons [1]\n\t-S/--save2pt\tSave volumetric output [1]\n\t-w/--savedetflag\t1:detector-id, 4:partial-path, 16:exit-pos, 32:exit-dir, add to combine [5]\n\t-U/--normalize\tnormalize output [1]" << std::endl;
         std::cout << "\t-j/--json\tJSON string to overwrite settings\n\t-t/--thread\tmanual total threads\n\t-T/--blocksize\tmanual thread-block size [64]\n\t-G/--gpuid\tdevice ID [1]\n\t--dumpjson\tdump settings as json\n\t--dumpmask\tdump domain as binary json\n\t-h/--help\tprint help\n\t-N/--net\tbrowse or download simulations from NeuroJSON.io\n\nBuilt-in benchmarks: " << MCX_benchmarks.dump(8) << std::endl;
         std::exit(0);
@@ -632,10 +761,11 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         } else if (bmid == bm_skinvessel) {
             cfg["Shapes"] = R"([{"Grid": {"Size": [200, 200, 200], "Tag": 1}}, {"ZLayers": [[1, 20, 1], [21, 32, 4], [33, 200, 3]]}, {"Cylinder": {"Tag": 2, "C0": [0, 100.5, 100.5], "C1": [200, 100.5, 100.5], "R": 20}}])"_json;
             cfg["Forward"] = {{"T0", 0.0}, {"T1", 5e-8}, {"Dt", 5e-8}};
-            cfg["Optode"]["Source"] = {{"Type", "disk"}, {"Pos", {100, 100, 20}}, {"Dir", {0, 0, 1}}, {"Param1", {60, 0, 0, 0}}};
-            cfg["Domain"]["LengthUnit"] = 0.005;
-            cfg["Domain"]["Media"] = {{{"mua", 1e-5}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 3.564e-05}, {"mus", 1.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 23.05426549}, {"mus", 9.398496241}, {"g", 0.9}, {"n", 1.37}},
-                {{"mua", 0.04584957865}, {"mus", 35.65405549}, {"g", 0.9}, {"n", 1.37}}, {{"mua", 1.657237447}, {"mus", 37.59398496}, {"g", 0.9}, {"n", 1.37}}
+            cfg["Optode"] = {{"Source", {{"Type", "disk"}, {"Pos", {100, 100, 20}}, {"Dir", {0, 0, 1}}, {"Param1", {60, 0, 0, 0}}}}};
+            cfg["Domain"] = {{"Media", {{{"mua", 0.002}, {"mus", 0.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 3.564e-05}, {"mus", 1.0}, {"g", 1.0}, {"n", 1.37}}, {{"mua", 23.05426549}, {"mus", 9.398496241}, {"g", 0.9}, {"n", 1.37}},
+                        {{"mua", 0.04584957865}, {"mus", 35.65405549}, {"g", 0.9}, {"n", 1.37}}, {{"mua", 1.657237447}, {"mus", 37.59398496}, {"g", 0.9}, {"n", 1.37}}
+                    }
+                }, {"LengthUnit", 0.005},  {"Dim", {200, 200, 200}}
             };
         } else if (bmid == bm_sphshells) {
             cfg["Shapes"] = R"([{"Grid": {"Size": [60, 60, 60], "Tag": 1}}, {"Sphere": {"O": [30, 30, 30], "R": 25, "Tag": 2}}, {"Sphere": {"O": [30, 30, 30], "R": 23, "Tag": 3}}, {"Sphere": {"O": [30, 30, 30], "R": 10, "Tag": 4}}])"_json;
@@ -690,7 +820,7 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
     std::string runcmd(std::string cmd) {
         std::array<char, 128> buffer;
         std::string result;
-        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+        std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(cmd.c_str(), "r"), pclose);
 
         if (!pipe) {
             throw std::runtime_error("unable to run curl to access online data at https://neurojson.io; please install curl first");
@@ -703,20 +833,26 @@ struct MCX_userio {    // main user IO handling interface, must be isolated with
         return result;
     }
 };
+/*
 template<const bool isreflect, const bool issavedet>
 double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, MCX_volume<float>& outputvol, float4* detpos, MCX_medium* prop, MCX_detect& detdata) {
     double energyescape = 0.0;
-    std::srand(!(cfg["Session"].contains("RNGSeed")) ? 1648335518 : (cfg["Session"]["RNGSeed"].get<int>() > 0 ? cfg["Session"]["RNGSeed"].get<int>() : std::time(0)));
     const uint64_t nphoton = cfg["Session"].value("Photons", 1000000);
-    const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};  //< TODO: need to implement per-thread ran object
+    const int num_threads = omp_get_max_threads();  // Get available CPU threads
+
+    std::srand(!(cfg["Session"].contains("RNGSeed")) ? 1648335518 : (cfg["Session"]["RNGSeed"].get<int>() > 0 ? cfg["Session"]["RNGSeed"].get<int>() : std::time(0)));
+    const dim4 seeds = {(uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand(), (uint32_t)std::rand()};
     const float4 pos = {cfg["Optode"]["Source"]["Pos"][0].get<float>(), cfg["Optode"]["Source"]["Pos"][1].get<float>(), cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f};
     const float4 dir = {cfg["Optode"]["Source"]["Dir"][0].get<float>(), cfg["Optode"]["Source"]["Dir"][1].get<float>(), cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f};
+
     MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
     MCX_photon p(pos, dir, ran, gcfg);
+
 #ifdef _OPENACC
     int ppathlen = detdata.ppathlen;
     float* detphotonbuffer = (float*)calloc(sizeof(float), detdata.ppathlen);
 #endif
+
 #ifdef GPU_OFFLOAD
     const int totaldetphotondatalen = issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 1;
     const int deviceid = cfg["Session"].value("DeviceID", 1) - 1, gridsize = cfg["Session"].value("ThreadNum", 100000) / cfg["Session"].value("BlockSize", 64);
@@ -725,40 +861,140 @@ double MCX_kernel(json& cfg, const MCX_param& gcfg, MCX_volume<int>& inputvol, M
 #else
     const int blocksize = cfg["Session"].value("BlockSize", 64); // nvc uses {num_teams,1,1} as griddim and {teams_thread_limit,1,1} as blockdim
 #endif
-    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol) _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
-    _PRAGMA_OMPACC_COPY(outputvol, detdata) _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
+    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol)
+    _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
+    _PRAGMA_OMPACC_COPY(outputvol, detdata)
+    _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondata[0:totaldetphotondatalen])
     _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, deviceid, firstprivate(detphotonbuffer[0:ppathlen]), reduction(+ : energyescape) firstprivate(ran, p))
-#else  // GPU_OFFLOAD
-    _PRAGMA_OMPACC_HOST_LOOP(reduction(+ : energyescape) firstprivate(ran, p))
-#endif
 
-    for (uint64_t i = 0; i < nphoton; i++) {
-#ifndef _OPENACC
-#ifdef USE_MALLOC
-        float* detphotonbuffer = (float*)malloc(sizeof(float) * detdata.ppathlen * issavedet);
-        memset(detphotonbuffer, 0, sizeof(float) * detdata.ppathlen * issavedet);
 #else
-        float detphotonbuffer[issavedet ? 10 : 1] = {};   // TODO: if changing 10 to detdata.ppathlen, speed of nvc++ built binary drops by 5x to 10x
-#endif
-#else
-        memset(detphotonbuffer, 0, sizeof(float) * detdata.ppathlen * issavedet);
-#endif
-        ran.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
-        p.launch(pos, dir, ran, gcfg);
-        p.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran, gcfg);
-        energyescape += p.pos.w;
-#ifndef _OPENACC
-#ifdef USE_MALLOC
-        free(detphotonbuffer);
-#endif
-#endif
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        MCX_rand ran_private(seeds.x, seeds.y, seeds.z, seeds.w);
+        MCX_photon p_private(pos, dir, ran_private, gcfg);
+        float detphotonbuffer[10] = {}; // Per-thread storage to avoid false sharing
+
+        #pragma omp for reduction(+:energyescape) schedule(static)
+
+        for (uint64_t i = 0; i < nphoton; i++) {
+            ran_private.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
+            p_private.launch(pos, dir, ran_private, gcfg);
+            p_private.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos, detdata, detphotonbuffer, ran_private, gcfg);
+            energyescape += p_private.pos.w;
+        }
     }
+
+#endif
 
 #ifdef _OPENACC
     free(detphotonbuffer);
 #endif
     return energyescape;
 }
+*/
+#include <mpi.h>
+template<const bool isreflect, const bool issavedet>
+double MCX_kernel(json& cfg,
+                  const MCX_param& gcfg,
+                  MCX_volume<int>& inputvol,
+                  MCX_volume<float>& outputvol,
+                  float4* detpos,
+                  MCX_medium* prop,
+                  MCX_detect& detdata) {
+    double energyescape_local = 0.0, energyescape_global = 0.0;
+
+#ifdef MPI_ENABLED
+    // Initialize MPI
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    const uint64_t nphoton_total = cfg["Session"].value("Photons", 1000000);
+    const uint64_t nphoton_per_process = nphoton_total / size;
+    const uint64_t start_photon = rank * nphoton_per_process;
+    const uint64_t end_photon = (rank == size - 1) ? nphoton_total : start_photon + nphoton_per_process;
+#else
+    const uint64_t start_photon = 0;
+    const uint64_t end_photon = cfg["Session"].value("Photons", 1000000);
+#endif
+
+    const dim4 seeds = { (uint32_t)std::rand(), (uint32_t)std::rand(),
+                         (uint32_t)std::rand(), (uint32_t)std::rand()
+                       };
+    const float4 pos = { cfg["Optode"]["Source"]["Pos"][0].get<float>(),
+                         cfg["Optode"]["Source"]["Pos"][1].get<float>(),
+                         cfg["Optode"]["Source"]["Pos"][2].get<float>(), 1.f
+                       };
+    const float4 dir = { cfg["Optode"]["Source"]["Dir"][0].get<float>(),
+                         cfg["Optode"]["Source"]["Dir"][1].get<float>(),
+                         cfg["Optode"]["Source"]["Dir"][2].get<float>(), 0.f
+                       };
+
+    MCX_rand ran(seeds.x, seeds.y, seeds.z, seeds.w);
+    MCX_photon p(pos, dir, ran, gcfg);
+
+#ifdef _OPENACC
+    int ppathlen = detdata.ppathlen;
+    float* detphotonbuffer = (float*)calloc(sizeof(float), detdata.ppathlen);
+#endif
+
+#ifdef GPU_OFFLOAD
+    // GPU offload branch remains unchanged.
+    const int totaldetphotondatalen = issavedet ? detdata.maxdetphotons * detdata.detphotondatalen : 1;
+    const int deviceid = cfg["Session"].value("DeviceID", 1) - 1,
+              gridsize = cfg["Session"].value("ThreadNum", 100000) / cfg["Session"].value("BlockSize", 64);
+#ifdef _LIBGOMP_OMP_LOCK_DEFINED
+    const int blocksize = cfg["Session"].value("BlockSize", 64) / 32;
+#else
+    const int blocksize = cfg["Session"].value("BlockSize", 64);
+#endif
+    _PRAGMA_OMPACC_COPYIN(pos, dir, seeds, gcfg, inputvol)
+    _PRAGMA_OMPACC_COPYIN(prop[0:gcfg.mediumnum], detpos[0:gcfg.detnum], inputvol.vol[0:inputvol.dimxyzt])
+    _PRAGMA_OMPACC_COPY(outputvol, detdata)
+    _PRAGMA_OMPACC_COPY(outputvol.vol[0:outputvol.dimxyzt], detdata.detphotondatalen[0:totaldetphotondatalen])
+    _PRAGMA_OMPACC_GPU_LOOP(gridsize, blocksize, deviceid, firstprivate(detphotonbuffer[0:ppathlen]),
+                            reduction(+ : energyescape_local) firstprivate(ran, p))
+#else
+    // CPU (OpenMP) branch.
+    #pragma omp parallel num_threads(omp_get_max_threads())
+    {
+        // Each thread uses its own random generator and photon object.
+        MCX_rand ran_private(seeds.x, seeds.y, seeds.z, seeds.w);
+        MCX_photon p_private(pos, dir, ran_private, gcfg);
+        float* detphotonbuffer = new float[detdata.ppathlen]();
+
+        // Use static scheduling to reduce overhead.
+        #pragma omp for reduction(+: energyescape_local) schedule(static)
+
+        for (uint64_t i = start_photon; i < end_photon; i++) {
+            // Reseed per iteration based on photon index.
+            ran_private.reseed(seeds.x ^ i, seeds.y | i, seeds.z ^ i, seeds.w | i);
+            p_private.launch(pos, dir, ran_private, gcfg);
+            p_private.run<isreflect, issavedet>(inputvol, outputvol, prop, detpos,
+                                                detdata, detphotonbuffer, ran_private, gcfg);
+            energyescape_local += p_private.pos.w;
+        }
+
+        delete[] detphotonbuffer;
+    }
+#endif
+
+#ifdef _OPENACC
+    free(detphotonbuffer);
+#endif
+
+#ifdef MPI_ENABLED
+    // Reduce energyescape across all MPI processes.
+    MPI_Reduce(&energyescape_local, &energyescape_global, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#else
+    energyescape_global = energyescape_local;
+#endif
+
+    return energyescape_global;
+}
+
+
 /// Main MCX simulation function, parsing user inputs via string arrays in argv[argn], can be called repeatedly
 int MCX_run_simulation(char* argv[], int argn = 1) {
     MCX_userio io(argv, argn);
@@ -775,7 +1011,7 @@ int MCX_run_simulation(char* argv[], int argn = 1) {
         /*.srcparam1*/ {srcparam1[0], srcparam1[1], srcparam1[2], srcparam1[3]}, /*.srcparam2*/ {srcparam2[0], srcparam2[1], srcparam2[2], srcparam2[3]}
     };
     MCX_volume<int> inputvol = io.domain;
-    MCX_volume<float> outputvol(io.cfg["Domain"]["Dim"][0].get<int>(), io.cfg["Domain"]["Dim"][1].get<int>(), io.cfg["Domain"]["Dim"][2].get<int>(), gcfg.maxgate);
+    MCX_volume<float> outputvol(inputvol.size.x, inputvol.size.y, inputvol.size.z, gcfg.maxgate);
     MCX_detect detdata(gcfg);
     MCX_medium* prop = new MCX_medium[gcfg.mediumnum];
     float4* detpos = new float4[gcfg.detnum];
